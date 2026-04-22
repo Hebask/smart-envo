@@ -13,18 +13,29 @@ venv/
 .env.*
 !.env.example
 
-# Databases
+# Databases and DB artifacts
 *.db
+*.db-*
+*.sqlite
+*.sqlite3
 iot.db
+*-wal
+*-shm
+sqlite_sidecar_backup_*/
+iot.db.before_*
+iot.db.recovery_*
 
 # Logs
 *.log
 
-# Backups / exports
+# Backups / exports / temp
 smartfirewall-backups/
 exports/
 *.tar.gz
 *.zip
+*.bak
+*.bak_*
+*.disabled
 
 # OS/editor
 .DS_Store
