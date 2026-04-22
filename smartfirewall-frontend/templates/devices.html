@@ -1,0 +1,387 @@
+{% extends "base.html" %}
+{% block title %}smart-envo Devices{% endblock %}
+{% block content %}
+
+<header class="header">
+    <div class="header-left">
+        <h1>smart-envo Devices</h1>
+        <p>Manage and control all network devices</p>
+    </div>
+     <div class="header-right"> </div>
+</header>
+
+<!-- Stats -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-value" data-stat="total">0</div>
+                <div class="stat-label">Total Devices</div>
+            </div>
+            <div class="stat-icon blue">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-value" data-stat="active">0</div>
+                <div class="stat-label">Active Now</div>
+            </div>
+            <div class="stat-icon green">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M9 12l2 2 4-4"></path>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-value" data-stat="pending">0</div>
+                <div class="stat-label">Pending Approval</div>
+            </div>
+            <div class="stat-icon yellow">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-value" data-stat="blocked">0</div>
+                <div class="stat-label">Blocked</div>
+            </div>
+            <div class="stat-icon red">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="15" y1="9" x2="9" y2="15"></line>
+                    <line x1="9" y1="9" x2="15" y2="15"></line>
+                </svg>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Filter Tabs -->
+<div class="card">
+    <div class="filter-tabs">
+        <button class="filter-tab active" data-type="all" data-tab="all" onclick="filterDevices('all')">All Devices (0)</button>
+        <button class="filter-tab" data-type="active" data-tab="active" onclick="filterDevices('active')">Active (0)</button>
+        <button class="filter-tab" data-type="pending" data-tab="pending" onclick="filterDevices('pending')">Pending (0)</button>
+        <button class="filter-tab" data-type="blocked" data-tab="blocked" onclick="filterDevices('blocked')">Blocked (0)</button>
+    </div>
+
+    <!-- Device Cards Grid -->
+    <div class="device-grid" style="margin-top: 20px;">
+        {{ super() }}
+    </div>
+</div>
+
+<script>
+  // ========= CONFIG =========
+  let ALL_DEVICES = [];
+  let CURRENT_FILTER = "all";
+
+  // ========= HELPERS =========
+  function showBackendDown(msg = "Backend is down or not reachable. Check PI IP / server.") {
+    alert(msg);
+  }
+async function api(path, options = {}) {
+    return await apiFetch(path, options);
+}
+function normalizeStatus(device) {
+  if (!device) return "unknown";
+
+  if (Number(device.approved) === 0) return "pending";
+
+  const blocked =
+    Number(device.effective_internet_blocked ?? device.internet_blocked ?? 0) === 1;
+
+  if (blocked) return "blocked";
+
+  return "active";
+}
+  // ========= RENDER =========
+  function renderDevices() {
+    const grid = document.querySelector(".device-grid");
+    if (!grid) return;
+
+    const filtered = ALL_DEVICES.filter(d => {
+      if (CURRENT_FILTER === "all") return true;
+      return normalizeStatus(d) === CURRENT_FILTER;
+    });
+
+    grid.innerHTML = "";
+
+    if (filtered.length === 0) {
+      grid.innerHTML = `<div class="empty-state" style="padding:16px;color:#fff;opacity:.8;">No devices found.</div>`;
+      return;
+    }
+
+    // Render cards
+    filtered.forEach(d => {
+      const status = normalizeStatus(d);
+      const mac = d.mac || d.MAC || d.mac_address || "";
+
+      const badgeClass =
+        status === "active" ? "badge-active" :
+        status === "pending" ? "badge-pending" :
+        status === "blocked" ? "badge-blocked" : "badge-unknown";
+
+      const actionsHtml = `
+  <div class="device-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+    ${status === "pending" && mac ? `<button class="btn btn-outline" onclick="setApproved('${mac}', true)">Approve</button>` : ``}
+    ${mac ? `<button class="btn btn-outline" onclick="toggleInternetBlocked('${mac}')">${Number(d.internet_blocked) === 1 ? "Unblock Internet" : "Block Internet"}</button>` : ``}
+    ${mac ? `<button class="btn btn-outline" onclick="toggleDnsFiltered('${mac}')">${Number(d.dns_filtered) === 1 ? "Disable DNS Filter" : "Enable DNS Filter"}</button>` : ``}
+    ${mac ? `<button class="btn btn-outline" onclick="manageDeviceGroups('${mac}')">Manage Groups</button>` : ``}
+  </div>
+`;
+
+      const card = document.createElement("div");
+      card.className = "device-card";
+      card.innerHTML = `
+        <div class="device-card-header" style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div>
+            <div class="device-name" style="font-weight:700;color:#111827;">${d.name || "Unknown Device"}</div>
+           <div class="device-meta" style="font-size:12px;color:#6B7280;margin-top:4px;">
+            IP: ${d.last_ip || d.ip || "-"} ${mac ? `| MAC: ${mac}` : ""}
+            ${d.winner_group_name ? `<br><strong>Group:</strong> ${d.winner_group_name}` : ""}
+           </div>
+          </div>
+          <span class="device-badge ${badgeClass}" style="padding:6px 10px;border-radius:999px;font-size:12px;font-weight:700;">
+            ${status || "unknown"}
+          </span>
+        </div>
+        ${actionsHtml}
+      `;
+
+      grid.appendChild(card);
+    });
+  }
+
+  function updateCountsUI() {
+    const total = ALL_DEVICES.length;
+    const active = ALL_DEVICES.filter(d => normalizeStatus(d) === "active").length;
+    const pending = ALL_DEVICES.filter(d => normalizeStatus(d) === "pending").length;
+    const blocked = ALL_DEVICES.filter(d => normalizeStatus(d) === "blocked").length;
+
+
+    const totalEl = document.querySelector('[data-stat="total"]');
+    const activeEl = document.querySelector('[data-stat="active"]');
+    const pendingEl = document.querySelector('[data-stat="pending"]');
+    const blockedEl = document.querySelector('[data-stat="blocked"]');
+
+    if (totalEl) totalEl.textContent = total;
+    if (activeEl) activeEl.textContent = active;
+    if (pendingEl) pendingEl.textContent = pending;
+    if (blockedEl) blockedEl.textContent = blocked;
+
+    const tabAll = document.querySelector('[data-tab="all"]');
+    const tabActive = document.querySelector('[data-tab="active"]');
+    const tabPending = document.querySelector('[data-tab="pending"]');
+    const tabBlocked = document.querySelector('[data-tab="blocked"]');
+
+    if (tabAll) tabAll.textContent = `All Devices (${total})`;
+    if (tabActive) tabActive.textContent = `Active (${active})`;
+    if (tabPending) tabPending.textContent = `Pending (${pending})`;
+    if (tabBlocked) tabBlocked.textContent = `Blocked (${blocked})`;
+  }
+
+  // ========= DATA LOAD =========
+ async function loadDevices() {
+  try {
+    const data = await api("/api/devices", { method: "GET" });
+    ALL_DEVICES = Array.isArray(data) ? data : (data.devices || []);
+
+    updateCountsUI();
+    renderDevices();
+  } catch (e) {
+    console.error(e);
+    showBackendDown();
+  }
+}
+
+  // ========= FILTER =========
+  function setActiveTab(type) {
+    document.querySelectorAll(".filter-tab").forEach(btn => btn.classList.remove("active"));
+    const btn = document.querySelector(`.filter-tab[data-type="${type}"]`);
+    if (btn) btn.classList.add("active");
+  }
+
+  function filterDevices(type) {
+    CURRENT_FILTER = type;
+    setActiveTab(type);
+    renderDevices();
+  }
+   
+    async function updateDevice(mac, patch) {
+  await api(`/api/devices/${encodeURIComponent(mac)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch)
+  });
+}
+
+  // ========= ACTIONS =========
+ async function setApproved(mac, approved) {
+  try {
+    const device = ALL_DEVICES.find(d => (d.mac || d.MAC || d.mac_address || "") === mac);
+    await updateDevice(mac, {
+      name: device?.name || "",
+      approved: approved ? 1 : 0,
+      internet_blocked: Number(device?.internet_blocked || 0),
+      dns_filtered: Number(device?.dns_filtered || 0)
+    });
+    await loadDevices();
+  } catch (e) {
+    console.error(e);
+    alert("Approve failed");
+  }
+}
+
+  async function toggleInternetBlocked(mac) {
+  try {
+    const device = ALL_DEVICES.find(d => (d.mac || d.MAC || d.mac_address || "") === mac);
+    await updateDevice(mac, {
+      name: device?.name || "",
+      approved: Number(device?.approved || 0),
+      internet_blocked: Number(device?.internet_blocked || 0) ? 0 : 1,
+      dns_filtered: Number(device?.dns_filtered || 0)
+    });
+    await loadDevices();
+  } catch (e) {
+    console.error(e);
+    alert("Internet block update failed");
+  }
+}
+
+ async function toggleDnsFiltered(mac) {
+  try {
+    const device = ALL_DEVICES.find(d => (d.mac || d.MAC || d.mac_address || "") === mac);
+    await updateDevice(mac, {
+      name: device?.name || "",
+      approved: Number(device?.approved || 0),
+      internet_blocked: Number(device?.internet_blocked || 0),
+      dns_filtered: Number(device?.dns_filtered || 0) ? 0 : 1
+    });
+    await loadDevices();
+  } catch (e) {
+    console.error(e);
+    alert("DNS filter update failed");
+  }
+}
+
+async function manageDeviceGroups(mac) {
+  try {
+    const [deviceGroupsData, allGroups] = await Promise.all([
+      api(`/api/devices/${encodeURIComponent(mac)}/groups`),
+      api(`/api/groups`)
+    ]);
+
+    const groups = Array.isArray(allGroups) ? allGroups : (allGroups.groups || []);
+    const currentGroups = deviceGroupsData.groups || [];
+    const currentIds = new Set(currentGroups.map(g => Number(g.id)));
+
+    let message = `Device ${mac}\n\nCurrent groups:\n`;
+    if (currentGroups.length) {
+      currentGroups.forEach(g => {
+        message += `- ${g.id}: ${g.name}${deviceGroupsData.winner && Number(deviceGroupsData.winner.id) === Number(g.id) ? " (WINNER)" : ""}\n`;
+      });
+    } else {
+      message += "None\n";
+    }
+
+    message += `\nAll groups:\n`;
+    (groups || []).forEach(g => {
+      message += `- ${g.id}: ${g.name}${currentIds.has(Number(g.id)) ? " [assigned]" : ""}\n`;
+    });
+
+    message += `\nType:\n+<group_id> to add\n-<group_id> to remove\nExample: +3`;
+
+    const input = prompt(message);
+    if (!input) return;
+
+    const value = input.trim();
+
+    if (value.startsWith("+")) {
+      const groupId = parseInt(value.slice(1), 10);
+      if (!groupId) {
+        alert("Invalid group id.");
+        return;
+      }
+      await addDeviceToGroup(mac, groupId);
+      return;
+    }
+
+    if (value.startsWith("-")) {
+      const groupId = parseInt(value.slice(1), 10);
+      if (!groupId) {
+        alert("Invalid group id.");
+        return;
+      }
+      await removeDeviceFromGroup(mac, groupId);
+      return;
+    }
+
+    alert("Use +<group_id> to add or -<group_id> to remove.");
+  } catch (e) {
+    console.error(e);
+    alert("Failed to manage device groups.");
+  }
+}
+
+async function addDeviceToGroup(mac, groupId) {
+  try {
+    await api(`/api/devices/${encodeURIComponent(mac)}/groups`, {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupId })
+    });
+    await loadDevices();
+    alert("Device added to group.");
+  } catch (e) {
+    console.error(e);
+    alert("Failed to add device to group.");
+  }
+}
+
+async function removeDeviceFromGroup(mac, groupId) {
+  try {
+    await api(`/api/devices/${encodeURIComponent(mac)}/groups/${groupId}`, {
+      method: "DELETE"
+    });
+    await loadDevices();
+    alert("Device removed from group.");
+  } catch (e) {
+    console.error(e);
+    alert("Failed to remove device from group.");
+  }
+}
+
+
+  // ========= INIT =========
+  window.addEventListener("DOMContentLoaded", () => {
+   
+    loadDevices();
+  });
+
+  window.filterDevices = filterDevices;
+  window.showAddDeviceModal = showAddDeviceModal;
+  window.setApproved = setApproved;
+  window.toggleInternetBlocked = toggleInternetBlocked;
+  window.toggleDnsFiltered = toggleDnsFiltered;
+  window.manageDeviceGroups = manageDeviceGroups;
+</script>
+
+
+{% endblock %}

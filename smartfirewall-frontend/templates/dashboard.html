@@ -1,0 +1,340 @@
+{% extends "base.html" %}
+{% block title %}smart-envo Dashboard{% endblock %}
+{% block content %}
+
+<header class="header">
+    <div class="header-left">
+        <h1>smart-envo Dashboard</h1>
+        <p>Monitor your network activity in real time</p>
+    </div>
+    <div class="header-right">
+        <div class="status-badge">
+            <div class="status-dot"></div>
+            smart-envo active
+        </div>
+    </div>
+</header>
+
+<!-- Stats Grid -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-value">0</div>
+                <div class="stat-label">Total Devices</div>
+                <div class="stat-change positive">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                        <polyline points="18 15 12 9 6 15"></polyline>
+                    </svg>
+                    Live backend data
+                </div>
+            </div>
+            <div class="stat-icon blue">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+                    <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-value">0</div>
+                <div class="stat-label">Blocked / Restricted Devices</div>
+                <div class="stat-change positive">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                        <polyline points="18 15 12 9 6 15"></polyline>
+                    </svg>
+                    Live backend data
+                </div>
+            </div>
+            <div class="stat-icon green">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-value">0</div>
+                <div class="stat-label">Pending Approval</div>
+                <div class="stat-change negative">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                        <polyline points="6 9 12 15 18 9"></polyline>
+                    </svg>
+                    Needs attention
+                </div>
+            </div>
+            <div class="stat-icon yellow">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-value">0%</div>
+                <div class="stat-label">System Status</div>
+                <div class="stat-change positive">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                        <polyline points="18 15 12 9 6 15"></polyline>
+                    </svg>
+                    Real status
+                </div>
+            </div>
+            <div class="stat-icon green">
+                <svg viewBox="0 0 24 24" stroke-width="2">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                </svg>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Usage Monitoring -->
+<div class="stats-grid" id="usage-stats-grid" style="margin-top:20px;">
+    <div class="stat-card">
+        <div class="stat-value" id="usage-total">0 B</div>
+        <div class="stat-label">Total Usage (24h)</div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-value" id="usage-upload">0 B</div>
+        <div class="stat-label">Upload (24h)</div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-value" id="usage-download">0 B</div>
+        <div class="stat-label">Download (24h)</div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-value" id="usage-devices">0</div>
+        <div class="stat-label">Devices With Traffic</div>
+    </div>
+</div>
+
+<div class="card" style="margin-top:20px;">
+  <div class="card-header">
+    <h3 class="card-title">Top Devices by Usage</h3>
+  </div>
+  <div id="top-usage-devices"></div>
+</div>
+
+<!-- Content Grid -->
+<div class="content-grid">
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">Real-Time Activity</h3>
+            <button class="view-all-btn" onclick="window.location.href='/activity'">View All</button>
+        </div>
+
+        <div class="activity-feed" id="dashboard-activity-feed"></div>
+    </div>
+
+    <div>
+        <div class="card" style="margin-bottom: 20px;">
+            <div class="card-header">
+                <h3 class="card-title">Quick Actions</h3>
+            </div>
+            <div class="quick-actions">
+                <button class="action-btn primary" onclick="window.location.href='/devices'">Add Device</button>
+                <button class="action-btn danger" onclick="window.location.href='/blacklist'">Block Website</button>
+                <button class="action-btn success" onclick="window.location.href='/scheduler'">Add Schedule</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('.usage-fill').forEach(fill => {
+    const width = fill.style.width;
+    fill.style.width = 0;
+    setTimeout(() => fill.style.width = width, 500);
+  });
+});
+
+function setStatByLabel(labelText, valueText) {
+  document.querySelectorAll(".stat-card").forEach(card => {
+    const label = card.querySelector(".stat-label");
+    const value = card.querySelector(".stat-value");
+    if (!label || !value) return;
+    if (label.textContent.trim() === labelText) {
+      value.textContent = valueText;
+    }
+  });
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes < 1) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let value = bytes;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function renderRecentAlerts(alerts) {
+  const feed = document.getElementById("dashboard-activity-feed");
+  if (!feed) return;
+
+  if (!alerts.length) {
+    feed.innerHTML = `
+      <div class="activity-item">
+        <div class="activity-content">
+          <div class="activity-device">No alerts yet</div>
+          <div class="activity-url">System is quiet.</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  feed.innerHTML = alerts.map(a => `
+    <div class="activity-item">
+      <div class="activity-indicator ${
+        a.level === "warning" ? "warning" :
+        a.level === "critical" ? "blocked" : "allowed"
+      }"></div>
+
+      <div class="activity-content">
+        <div class="activity-device">${a.title || "Alert"}</div>
+        <div class="activity-url">${a.message || ""}</div>
+      </div>
+
+      <div class="activity-badge">${a.level || "info"}</div>
+      <div class="activity-time">${a.ts || ""}</div>
+    </div>
+  `).join("");
+}
+
+function renderRecentAudit(audit) {
+  const feed = document.getElementById("dashboard-activity-feed");
+  if (!feed) return;
+
+  if (!audit.length) {
+    feed.innerHTML = `
+      <div class="activity-item">
+        <div class="activity-content">
+          <div class="activity-device">No activity yet</div>
+          <div class="activity-url">No recent audit logs.</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  feed.innerHTML = audit.map(a => `
+    <div class="activity-item">
+      <div class="activity-indicator allowed"></div>
+
+      <div class="activity-content">
+        <div class="activity-device">${a.action || "Audit Event"}</div>
+        <div class="activity-url">${a.target_type || "-"}: ${a.target_id || "-"}</div>
+      </div>
+
+      <div class="activity-badge">${a.actor || "-"}</div>
+      <div class="activity-time">${a.ts || ""}</div>
+    </div>
+  `).join("");
+}
+
+function renderUsageCards(summary) {
+  document.getElementById("usage-total").textContent = formatBytes(summary.total_bytes || 0);
+  document.getElementById("usage-upload").textContent = formatBytes(summary.total_tx_bytes || 0);
+  document.getElementById("usage-download").textContent = formatBytes(summary.total_rx_bytes || 0);
+  document.getElementById("usage-devices").textContent = summary.devices_count || 0;
+}
+
+function renderTopUsageDevices(devices) {
+  const container = document.getElementById("top-usage-devices");
+  if (!container) return;
+
+  if (!devices.length) {
+    container.innerHTML = `<div style="padding:16px;">No usage data yet. Wait a few minutes after traffic starts.</div>`;
+    return;
+  }
+
+  const top = devices.slice(0, 5);
+
+  container.innerHTML = `
+    <div class="log-row log-header">
+      <div>Device</div>
+      <div>IP</div>
+      <div>Upload</div>
+      <div>Download</div>
+      <div>Total</div>
+    </div>
+    ${top.map(d => `
+      <div class="log-row usage-device-row" data-mac="${d.mac}">
+        <div>${d.name || "Unnamed Device"}<br><small>${d.mac}</small></div>
+        <div>${d.last_ip || "-"}</div>
+        <div>${formatBytes(d.tx_bytes)}</div>
+        <div>${formatBytes(d.rx_bytes)}</div>
+        <div>${formatBytes(d.total_bytes)}</div>
+      </div>
+    `).join("")}
+  `;
+}
+
+async function loadDashboardSummary() {
+  try {
+    const data = await apiFetch("/api/dashboard/summary");
+    if (!data.ok) throw new Error(data.error || "Failed to load dashboard summary");
+
+    const s = data.summary || {};
+
+    setStatByLabel("Total Devices", s.total_devices ?? 0);
+    setStatByLabel("Pending Approval", s.pending_devices ?? 0);
+    setStatByLabel("Blocked / Restricted Devices", s.effective_blocked_devices ?? 0);
+
+    const uptimeText = (s.total_devices ?? 0) > 0 ? "Active" : "No Devices";
+    setStatByLabel("System Status", uptimeText);
+
+    if (Array.isArray(data.recent_alerts) && data.recent_alerts.length) {
+      renderRecentAlerts(data.recent_alerts);
+    } else {
+      renderRecentAudit(data.recent_audit || []);
+    }
+  } catch (e) {
+    console.error(e);
+    alert("Dashboard cannot reach backend.");
+  }
+}
+
+async function loadUsageDashboard() {
+  try {
+    const [summaryData, devicesData] = await Promise.all([
+      apiFetch("/api/usage/summary?hours=24"),
+      apiFetch("/api/usage/devices?hours=24")
+    ]);
+
+    if (!summaryData.ok) throw new Error(summaryData.error || "Failed to load usage summary");
+    if (!devicesData.ok) throw new Error(devicesData.error || "Failed to load usage devices");
+
+    renderUsageCards(summaryData.summary || {});
+    renderTopUsageDevices(devicesData.devices || []);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadDashboardSummary();
+  loadUsageDashboard();
+});
+</script>
+
+{% endblock %}

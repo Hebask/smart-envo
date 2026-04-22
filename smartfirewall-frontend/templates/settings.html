@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+{% block title %}smart-envo Settings{% endblock %}
+{% block content %}
+
+<style>
+    .settings-grid {
+        display: grid;
+        gap: 20px;
+    }
+    .settings-section {
+        background: white;
+        padding: 25px;
+        border-radius: 16px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+    }
+    .settings-section h3 {
+        font-size: 18px;
+        font-weight: 700;
+        color: #2d3748;
+        margin-bottom: 5px;
+    }
+    .settings-section p {
+        color: #718096;
+        font-size: 14px;
+        margin-bottom: 20px;
+    }
+    .setting-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 15px 0;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .setting-item:last-child {
+        border-bottom: none;
+    }
+    .setting-info h4 {
+        font-size: 15px;
+        font-weight: 600;
+        color: #2d3748;
+        margin-bottom: 4px;
+    }
+    .setting-info p {
+        font-size: 13px;
+        color: #718096;
+        margin: 0;
+    }
+    .toggle-switch {
+        position: relative;
+        width: 50px;
+        height: 26px;
+        background: #e2e8f0;
+        border-radius: 20px;
+        cursor: pointer;
+        transition: all 0.3s;
+    }
+    .toggle-switch.active {
+        background: #10b981;
+    }
+    .toggle-switch::after {
+        content: '';
+        position: absolute;
+        width: 20px;
+        height: 20px;
+        background: white;
+        border-radius: 50%;
+        top: 3px;
+        left: 3px;
+        transition: all 0.3s;
+    }
+    .toggle-switch.active::after {
+        left: 27px;
+    }
+    .danger-zone {
+        border: 2px solid #fee;
+        background: #fef2f2;
+    }
+    .danger-zone h3 {
+        color: #dc2626;
+    }
+    .system-info-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 15px;
+        margin-top: 15px;
+    }
+    .info-box {
+        background: #f7fafc;
+        padding: 15px;
+        border-radius: 10px;
+    }
+    .info-label {
+        font-size: 12px;
+        color: #718096;
+        margin-bottom: 5px;
+    }
+    .info-value {
+        font-size: 16px;
+        font-weight: 700;
+        color: #2d3748;
+    }
+</style>
+
+<header class="header">
+    <div class="header-left">
+        <h1>smart-envo Settings</h1>
+        <p>Configure supported smart-envo system settings</p>
+    </div>
+    <div class="header-right">
+        <button class="btn btn-primary" onclick="saveSettings()">Save Changes</button>
+    </div>
+</header>
+
+
+<div class="card admin-account-card">
+    <div class="card-header">
+        <h3 class="card-title">Administrator Account</h3>
+    </div>
+    <div class="admin-account-body">
+        <div><strong>Mode:</strong> Admin</div>
+        <div><strong>Email:</strong> {{ admin_email or user_email or "Not available" }}</div>
+        
+    </div>
+</div>
+
+<div class="settings-grid">
+
+    <!-- General Settings -->
+    <div class="settings-section">
+        <h3>General Settings</h3>
+        <p>Configure basic smart-envo preferences</p>
+
+        <div class="setting-item">
+            <div class="setting-info">
+                <h4>Enable smart-envo</h4>
+                <p>Turn the smart-envo protection on or off</p>
+            </div>
+            <div id="toggle-firewall_enabled" class="toggle-switch" onclick="toggleSetting('firewall_enabled')"></div>
+        </div>
+
+        <div class="setting-item">
+            <div class="setting-info">
+                <h4>Auto-Block Unknown Devices</h4>
+                <p>Automatically block devices not on the allow-list</p>
+            </div>
+            <div id="toggle-auto_block" class="toggle-switch" onclick="toggleSetting('auto_block')"></div>
+        </div>
+
+        <div class="setting-item">
+            <div class="setting-info">
+                <h4>Enable Device Discovery</h4>
+                <p>Scan network for new devices automatically</p>
+            </div>
+            <div id="toggle-device_discovery" class="toggle-switch" onclick="toggleSetting('device_discovery')"></div>
+        </div>
+
+        <div class="setting-item">
+            <div class="setting-info">
+                <h4>Real-Time Traffic Monitoring</h4>
+                <p>Monitor all network traffic in real-time</p>
+            </div>
+            <div id="toggle-traffic_monitoring" class="toggle-switch" onclick="toggleSetting('traffic_monitoring')"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+async function api(path, options = {}) {
+    return await apiFetch(path, options);
+}
+
+let SETTINGS = {
+    firewall_enabled: false,
+    auto_block: false,
+    device_discovery: false,
+    traffic_monitoring: false,
+    email_alerts: false,
+};
+
+function asEnabled(value) {
+    if (typeof value === "string") {
+        const v = value.trim().toLowerCase();
+        return v === "true" || v === "1" || v === "yes" || v === "on";
+    }
+    return value === true || value === 1;
+}
+
+function setToggleState(key, enabled) {
+    const el = document.getElementById(`toggle-${key}`);
+    if (!el) return;
+
+    if (enabled) {
+        el.classList.add("active");
+    } else {
+        el.classList.remove("active");
+    }
+}
+
+function syncAllToggles() {
+    Object.keys(SETTINGS).forEach(key => {
+        setToggleState(key, asEnabled(SETTINGS[key]));
+    });
+}
+
+function toggleSetting(key) {
+    SETTINGS[key] = !asEnabled(SETTINGS[key]);
+    setToggleState(key, asEnabled(SETTINGS[key]));
+}
+
+function normalizeSettings(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+
+    return {
+        firewall_enabled: source.firewall_enabled ?? false,
+        auto_block: source.auto_block_unknown_devices ?? false,
+        device_discovery: source.device_discovery_enabled ?? false,
+        traffic_monitoring: source.realtime_monitoring_enabled ?? false,
+        email_alerts: source.email_notifications_enabled ?? false,
+    };
+}
+
+async function loadSettings() {
+    try {
+        const data = await api("/api/settings");
+        const settings = data && data.settings ? data.settings : data;
+        SETTINGS = normalizeSettings(settings);
+        syncAllToggles();
+    } catch (e) {
+        console.error(e);
+        const banner = document.createElement("div");
+        banner.style.cssText =
+            "padding:12px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#991b1b;margin-bottom:16px;";
+        banner.textContent = "Failed to load settings. Check backend connection.";
+        document.querySelector(".settings-grid").prepend(banner);
+    }
+}
+
+async function saveSettings() {
+    try {
+        const payload = {
+            firewall_enabled: asEnabled(SETTINGS.firewall_enabled),
+            auto_block_unknown_devices: asEnabled(SETTINGS.auto_block),
+            device_discovery_enabled: asEnabled(SETTINGS.device_discovery),
+            realtime_monitoring_enabled: asEnabled(SETTINGS.traffic_monitoring),
+            email_notifications_enabled: asEnabled(SETTINGS.email_alerts)
+        };
+
+        await api("/api/settings", {
+            method: "PUT",
+            body: JSON.stringify(payload)
+        });
+
+        SETTINGS = normalizeSettings(payload);
+        syncAllToggles();
+        alert("Settings saved.");
+    } catch (e) {
+        console.error(e);
+        alert("Failed to save settings. Check backend connection.");
+    }
+}
+
+document.addEventListener("DOMContentLoaded", loadSettings);
+
+window.toggleSetting = toggleSetting;
+window.saveSettings = saveSettings;
+</script>
+
+{% endblock %}

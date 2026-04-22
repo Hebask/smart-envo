@@ -1,0 +1,596 @@
+{% extends "base.html" %}
+{% block title %}smart-envo Activity{% endblock %}
+{% block content %}
+
+<header class="header">
+    <div class="header-left">
+        <h1>smart-envo Activity</h1>
+        <p>Real activity logs, usage statistics, and admin audit history</p>
+    </div>
+
+    <div class="header-right">
+        <div class="export-options">
+            <button class="btn btn-outline" id="export-activity-csv">Export Activity CSV</button>
+            <button class="btn btn-primary" id="refresh-activity-btn">Refresh</button>
+        </div>
+    </div>
+</header>
+
+<!-- Activity Summary -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value" id="activity-total-rows">0</div>
+        <div class="stat-label">Total Activity Rows</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="activity-categories-seen">0</div>
+        <div class="stat-label">Categories Seen</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="activity-devices-seen">0</div>
+        <div class="stat-label">Devices Seen</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="activity-groups-seen">0</div>
+        <div class="stat-label">Groups Seen</div>
+    </div>
+</div>
+
+<!-- Filters -->
+<div class="filters-bar">
+    <div class="form-group">
+        <label class="form-label">Rows to Load</label>
+        <select class="form-select" id="activity-limit-filter">
+            <option value="10">10</option>
+            <option value="25" selected>25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+        </select>
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">Category</label>
+        <select class="form-select" id="activity-category-filter">
+            <option value="">All Categories</option>
+        </select>
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">Device</label>
+        <select class="form-select" id="activity-device-filter">
+            <option value="">All Devices</option>
+        </select>
+    </div>
+
+    <div class="form-group" style="flex:1;">
+        <label class="form-label">Search</label>
+        <input class="form-input" id="activity-search-filter" placeholder="Search app, domain, MAC, IP, or category">
+    </div>
+
+    <button class="btn btn-primary" id="apply-activity-filter">Apply</button>
+</div>
+
+<!-- Recent Activity Logs -->
+<div class="card" style="margin-bottom:20px;">
+    <div class="section-header">
+        <h3>Recent Activity Logs</h3>
+    </div>
+
+    <div class="log-table-wrapper" id="activity-table">
+        <div class="log-row log-header activity-grid">
+            <div>Time</div>
+            <div>App / Site</div>
+            <div>Domain</div>
+            <div>Category</div>
+            <div>Device</div>
+            <div>Group</div>
+            <div>IP</div>
+        </div>
+    </div>
+</div>
+
+<!-- Network Usage -->
+<div class="card" style="margin-bottom:20px;">
+    <div class="section-header">
+        <h3>Network Usage (24h)</h3>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value" id="activity-usage-total">0 B</div>
+            <div class="stat-label">Total Traffic</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-value" id="activity-usage-upload">0 B</div>
+            <div class="stat-label">Upload</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-value" id="activity-usage-download">0 B</div>
+            <div class="stat-label">Download</div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-value" id="activity-usage-devices">0</div>
+            <div class="stat-label">Devices</div>
+        </div>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom:20px;">
+    <div class="section-header">
+        <h3>Usage By Device</h3>
+    </div>
+
+    <div id="usage-devices-table"></div>
+</div>
+
+<!-- Admin Audit -->
+<div class="card">
+    <div class="section-header">
+        <h3>Admin Audit Log</h3>
+    </div>
+
+    <div class="log-table-wrapper" id="audit-table">
+        <div class="log-row log-header audit-grid">
+            <div>Time</div>
+            <div>Actor</div>
+            <div>Action</div>
+            <div>Target Type</div>
+            <div>Target ID</div>
+            <div>IP</div>
+        </div>
+    </div>
+</div>
+
+<script>
+async function api(path, options = {}) {
+  return await apiFetch(path, options);
+}
+
+const activityState = {
+  logs: [],
+  filteredLogs: [],
+  summary: { by_category: [], by_device: [], by_group: [] },
+  usageSummary: null,
+  usageDevices: [],
+  auditLogs: []
+};
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes < 1) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let value = Number(bytes);
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function renderActivityStats(summaryData) {
+  const byCategory = summaryData.by_category || [];
+  const byDevice = summaryData.by_device || [];
+  const byGroup = summaryData.by_group || [];
+
+  const totalRows = byCategory.reduce((sum, row) => sum + Number(row.count || 0), 0);
+  const categoriesSeen = byCategory.length;
+  const devicesSeen = byDevice.length;
+  const groupsSeen = byGroup.filter(g => g.group_id !== null && g.group_id !== undefined).length;
+
+  document.getElementById("activity-total-rows").textContent = totalRows;
+  document.getElementById("activity-categories-seen").textContent = categoriesSeen;
+  document.getElementById("activity-devices-seen").textContent = devicesSeen;
+  document.getElementById("activity-groups-seen").textContent = groupsSeen;
+}
+
+function populateFilters(summaryData, devices = []) {
+  const categorySelect = document.getElementById("activity-category-filter");
+  const deviceSelect = document.getElementById("activity-device-filter");
+
+  const currentCategory = categorySelect.value;
+  const currentDevice = deviceSelect.value;
+
+  const categoryOptions = ['<option value="">All Categories</option>']
+    .concat((summaryData.by_category || []).map(row => {
+      const category = row.category || "Other";
+      return `<option value="${escapeHtml(category)}">${escapeHtml(category)} (${row.count || 0})</option>`;
+    }));
+
+  const deviceCountMap = {};
+  (summaryData.by_device || []).forEach(row => {
+    const key = String((row.device_mac || row.device_ip || "")).toLowerCase();
+    if (key) deviceCountMap[key] = Number(row.count || 0);
+  });
+
+  const sourceDevices = (devices && devices.length)
+    ? devices
+    : (summaryData.by_device || []).map(row => ({
+        name: row.device_mac || row.device_ip || "Unknown device",
+        mac: row.device_mac || "",
+        last_ip: row.device_ip || ""
+      }));
+
+  const deviceOptions = ['<option value="">All Devices</option>']
+    .concat(sourceDevices.map(row => {
+      const value = row.mac || row.last_ip || "";
+      const countKey = String((row.mac || row.last_ip || "")).toLowerCase();
+      const count = deviceCountMap[countKey] || 0;
+      const label = row.mac
+        ? `${row.name || "Unnamed Device"} • ${row.last_ip || "-"} (${row.mac})`
+        : (row.last_ip || "Unknown device");
+      return `<option value="${escapeHtml(value)}">${escapeHtml(label)}${count ? ` (${count})` : ""}</option>`;
+    }));
+
+  categorySelect.innerHTML = categoryOptions.join("");
+  deviceSelect.innerHTML = deviceOptions.join("");
+
+  categorySelect.value = currentCategory;
+  deviceSelect.value = currentDevice;
+}
+
+function getFilteredLogs() {
+  const category = document.getElementById("activity-category-filter").value.trim().toLowerCase();
+  const device = document.getElementById("activity-device-filter").value.trim().toLowerCase();
+  const search = document.getElementById("activity-search-filter").value.trim().toLowerCase();
+
+  return (activityState.logs || []).filter(log => {
+    const matchesCategory = !category || (String(log.category || "").toLowerCase() === category);
+
+    const deviceMac = String(log.device_mac || "").toLowerCase();
+    const deviceIp = String(log.device_ip || "").toLowerCase();
+    const matchesDevice = !device || deviceMac === device || deviceIp === device;
+
+    const haystack = [
+      log.ts,
+      log.app_name,
+      log.domain,
+      log.category,
+      log.device_mac,
+      log.device_ip,
+      log.group_id
+    ].map(v => String(v || "").toLowerCase()).join(" ");
+
+    const matchesSearch = !search || haystack.includes(search);
+
+    return matchesCategory && matchesDevice && matchesSearch;
+  });
+}
+
+function renderActivityTable(logs) {
+  const wrapper = document.getElementById("activity-table");
+  if (!wrapper) return;
+
+  const header = `
+    <div class="log-row log-header activity-grid">
+      <div>Time</div>
+      <div>App / Site</div>
+      <div>Domain</div>
+      <div>Category</div>
+      <div>Device</div>
+      <div>Group</div>
+      <div>IP</div>
+    </div>
+  `;
+
+  if (!logs.length) {
+    wrapper.innerHTML = header + `
+      <div class="log-row activity-grid">
+        <div>No activity logs</div>
+        <div>-</div>
+        <div>-</div>
+        <div>-</div>
+        <div>-</div>
+        <div>-</div>
+        <div>-</div>
+      </div>
+    `;
+    return;
+  }
+
+  wrapper.innerHTML = header + logs.map(log => `
+    <div class="log-row activity-grid">
+      <div class="log-time">${escapeHtml(log.ts || "-")}</div>
+      <div class="log-device">${escapeHtml(log.app_name || "-")}</div>
+      <div class="log-url" title="${escapeHtml(log.domain || "-")}">${escapeHtml(log.domain || "-")}</div>
+      <div>${escapeHtml(log.category || "-")}</div>
+      <div title="${escapeHtml(log.device_mac || "-")}">${escapeHtml(log.device_mac || "-")}</div>
+      <div>${log.group_id ?? "-"}</div>
+      <div class="log-duration">${escapeHtml(log.device_ip || "-")}</div>
+    </div>
+  `).join("");
+}
+
+function renderUsageCards(summary) {
+  if (!summary) return;
+
+  document.getElementById("activity-usage-total").textContent =
+    formatBytes(summary.total_bytes || 0);
+
+  document.getElementById("activity-usage-upload").textContent =
+    formatBytes(summary.total_tx_bytes || 0);
+
+  document.getElementById("activity-usage-download").textContent =
+    formatBytes(summary.total_rx_bytes || 0);
+
+  document.getElementById("activity-usage-devices").textContent =
+    summary.devices_count || 0;
+}
+
+function renderUsageDevicesTable(devices) {
+  const wrapper = document.getElementById("usage-devices-table");
+  if (!wrapper) return;
+
+  if (!devices.length) {
+    wrapper.innerHTML = `<div style="padding:16px;">No usage data yet.</div>`;
+    return;
+  }
+
+  wrapper.innerHTML = `
+    <div class="log-row log-header usage-grid">
+      <div>Device</div>
+      <div>IP</div>
+      <div>Upload</div>
+      <div>Download</div>
+      <div>Total</div>
+      <div>Packets</div>
+    </div>
+
+    ${devices.map(d => `
+      <div class="log-row usage-grid">
+        <div>${escapeHtml(d.name || "Unnamed Device")}<br><small>${escapeHtml(d.mac || "-")}</small></div>
+        <div>${escapeHtml(d.last_ip || "-")}</div>
+        <div>${formatBytes(d.tx_bytes || 0)}</div>
+        <div>${formatBytes(d.rx_bytes || 0)}</div>
+        <div>${formatBytes(d.total_bytes || 0)}</div>
+        <div>${d.total_packets || 0}</div>
+      </div>
+    `).join("")}
+  `;
+}
+
+function renderAuditTable(logs) {
+  const wrapper = document.getElementById("audit-table");
+  if (!wrapper) return;
+
+  const header = `
+    <div class="log-row log-header audit-grid">
+      <div>Time</div>
+      <div>Actor</div>
+      <div>Action</div>
+      <div>Target Type</div>
+      <div>Target ID</div>
+      <div>IP</div>
+    </div>
+  `;
+
+  if (!logs.length) {
+    wrapper.innerHTML = header + `
+      <div class="log-row audit-grid">
+        <div>No audit logs</div>
+        <div>-</div>
+        <div>-</div>
+        <div>-</div>
+        <div>-</div>
+        <div>-</div>
+      </div>
+    `;
+    return;
+  }
+
+  wrapper.innerHTML = header + logs.map(log => `
+    <div class="log-row audit-grid">
+      <div class="log-time">${escapeHtml(log.ts || "-")}</div>
+      <div class="log-device">${escapeHtml(log.actor || "-")}</div>
+      <div class="log-url">${escapeHtml(log.action || "-")}</div>
+      <div>${escapeHtml(log.target_type || "-")}</div>
+      <div>${escapeHtml(log.target_id || "-")}</div>
+      <div class="log-duration">${escapeHtml(log.actor_ip || "-")}</div>
+    </div>
+  `).join("");
+}
+
+function applyActivityFilters() {
+  activityState.filteredLogs = getFilteredLogs();
+  renderActivityTable(activityState.filteredLogs);
+}
+
+function exportActivityCsv() {
+  const rows = activityState.filteredLogs || [];
+  const header = ["ts", "app_name", "domain", "category", "device_mac", "group_id", "device_ip"];
+  const csvRows = [header.join(",")].concat(
+    rows.map(row =>
+      header.map(key => {
+        const value = row[key] ?? "";
+        const escaped = String(value).replace(/"/g, '""');
+        return `"${escaped}"`;
+      }).join(",")
+    )
+  );
+
+  const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "activity_logs.csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function loadActivityPage() {
+  try {
+    const limit = document.getElementById("activity-limit-filter").value || "25";
+
+    const [activityData, summaryData, usageSummaryData, usageDevicesData, auditData, devicesData] = await Promise.all([
+      api(`/api/activity-logs?limit=${encodeURIComponent(limit)}`),
+      api(`/api/activity-logs/summary?limit=${encodeURIComponent(limit)}`),
+      api("/api/usage/summary?hours=24"),
+      api("/api/usage/devices?hours=24"),
+      api("/api/audit?limit=20"),
+      api("/api/devices")
+    ]);
+
+    if (!activityData.ok) throw new Error(activityData.error || "Failed to load activity logs");
+    if (!summaryData.ok) throw new Error(summaryData.error || "Failed to load activity summary");
+    if (!usageSummaryData.ok) throw new Error(usageSummaryData.error || "Failed to load usage summary");
+    if (!usageDevicesData.ok) throw new Error(usageDevicesData.error || "Failed to load usage by device");
+    if (!auditData.ok) throw new Error(auditData.error || "Failed to load audit log");
+
+    const devicesList = Array.isArray(devicesData)
+      ? devicesData
+      : Array.isArray(devicesData.devices)
+        ? devicesData.devices
+        : [];
+
+    activityState.logs = activityData.items || [];
+    activityState.summary = {
+      by_category: summaryData.by_category || [],
+      by_device: summaryData.by_device || [],
+      by_group: summaryData.by_group || []
+    };
+    activityState.usageSummary = usageSummaryData.summary || {};
+    activityState.usageDevices = usageDevicesData.devices || [];
+    activityState.auditLogs = auditData.logs || [];
+
+    renderActivityStats(activityState.summary);
+    populateFilters(activityState.summary, devicesList);
+    applyActivityFilters();
+    renderUsageCards(activityState.usageSummary);
+    renderUsageDevicesTable(activityState.usageDevices);
+    renderAuditTable(activityState.auditLogs);
+  } catch (e) {
+    console.error(e);
+    alert("Could not load activity data.");
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadActivityPage();
+
+  document.getElementById("apply-activity-filter").addEventListener("click", applyActivityFilters);
+  document.getElementById("refresh-activity-btn").addEventListener("click", loadActivityPage);
+  document.getElementById("export-activity-csv").addEventListener("click", exportActivityCsv);
+
+  document.getElementById("activity-search-filter").addEventListener("input", applyActivityFilters);
+  document.getElementById("activity-category-filter").addEventListener("change", applyActivityFilters);
+  document.getElementById("activity-device-filter").addEventListener("change", applyActivityFilters);
+  document.getElementById("activity-limit-filter").addEventListener("change", loadActivityPage);
+});
+</script>
+
+<style>
+    .filters-bar {
+        background: white;
+        padding: 20px;
+        border-radius: 12px;
+        margin-bottom: 20px;
+        display: flex;
+        gap: 15px;
+        flex-wrap: wrap;
+        align-items: end;
+    }
+
+    .log-table-wrapper {
+        background: white;
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    .log-row {
+        padding: 15px 20px;
+        border-bottom: 1px solid #e2e8f0;
+        align-items: center;
+        transition: all 0.2s;
+    }
+
+    .log-row:hover {
+        background: #f7fafc;
+    }
+
+    .log-header {
+        font-weight: 700;
+        color: #4a5568;
+        font-size: 13px;
+        text-transform: uppercase;
+        background: #f7fafc;
+    }
+
+    .activity-grid {
+        display: grid;
+        grid-template-columns: 150px 170px minmax(220px, 1fr) 120px 190px 80px 130px;
+        gap: 12px;
+    }
+
+    .usage-grid {
+        display: grid;
+        grid-template-columns: minmax(220px, 1.2fr) 140px 120px 120px 120px 100px;
+        gap: 12px;
+    }
+
+    .audit-grid {
+        display: grid;
+        grid-template-columns: 150px 140px minmax(200px, 1fr) 120px 140px 130px;
+        gap: 12px;
+    }
+
+    .log-time {
+        font-size: 13px;
+        color: #718096;
+    }
+
+    .log-device {
+        font-weight: 600;
+        color: #2d3748;
+        font-size: 14px;
+    }
+
+    .log-url {
+        color: #4a5568;
+        font-size: 13px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .log-duration {
+        color: #718096;
+        font-size: 13px;
+    }
+
+    .export-options {
+        display: flex;
+        gap: 10px;
+    }
+
+    @media (max-width: 1200px) {
+        .activity-grid,
+        .usage-grid,
+        .audit-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .log-header {
+            display: none;
+        }
+
+        .log-row {
+            padding: 14px 16px;
+        }
+    }
+</style>
+
+{% endblock %}

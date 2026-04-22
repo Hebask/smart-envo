@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+{% block title %}Managed Profiles{% endblock %}
+
+{% block content %}
+
+<div class="topbar">
+  <div class="heading">
+    <h1>Managed Profiles</h1>
+    <p>Manage people or role-based profiles and their linked devices</p>
+  </div>
+  <button class="btn-primary" onclick="createProfile()">+ Add Profile</button>
+</div>
+
+<div id="profiles-error" style="display:none; padding:12px 16px; background:#fef2f2;
+     border:1px solid #fecaca; border-radius:10px; color:#991b1b; margin-bottom:16px;"></div>
+
+<div id="profiles-container">
+  <div class="skeleton">Loading profiles...</div>
+</div>
+
+<script>
+async function api(path, options = {}) {
+  return await apiFetch(path, options);
+}
+
+let profileCache = [];
+
+function showError(msg) {
+  const el = document.getElementById("profiles-error");
+  el.textContent = msg;
+  el.style.display = "block";
+}
+
+function hideError() {
+  document.getElementById("profiles-error").style.display = "none";
+}
+
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function formatDateTime(ts) {
+  if (!ts) return "No activity yet";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString();
+}
+
+const AVATAR_COLORS = [
+  "#4f46e5","#0891b2","#059669","#d97706",
+  "#dc2626","#7c3aed","#db2777","#0284c7"
+];
+
+function avatarColor(name) {
+  let hash = 0;
+  for (let c of (name || "?")) hash = c.charCodeAt(0) + ((hash << 5) - hash);
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
+
+async function loadProfiles() {
+  hideError();
+  try {
+    const data = await api("/api/managed-users");
+    if (!data.ok) throw new Error(data.error || "Failed to load");
+    profileCache = data.items || [];
+    renderProfiles();
+  } catch (e) {
+    showError("Could not load profiles. Check backend connection.");
+    document.getElementById("profiles-container").innerHTML = "";
+  }
+}
+
+function renderProfiles() {
+  const container = document.getElementById("profiles-container");
+
+  if (!profileCache.length) {
+    container.innerHTML = `
+      <div style="text-align:center; padding:60px 20px; color:#6B7280;">
+        <div style="font-size:48px; margin-bottom:16px;">👤</div>
+        <p style="font-size:16px; font-weight:500;">No profiles yet</p>
+        <p style="font-size:13px;">Add a profile for each person or role you want to monitor</p>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = profileCache.map((p, i) => {
+    const letter = (p.name || "?").charAt(0).toUpperCase();
+    const color = avatarColor(p.name);
+    const devCount = p.devices_count ?? 0;
+    const latestActivity = formatDateTime(p.latest_activity_ts);
+    const topCategory = p.top_category || "No data";
+    const inactive = devCount === 0;
+
+    return `
+    <div class="card" style="margin-bottom:16px;">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:16px;">
+
+        <div style="display:flex; align-items:flex-start; gap:14px; min-width:260px; flex:1;">
+          <div style="width:52px; height:52px; border-radius:50%; background:${color};
+               display:flex; align-items:center; justify-content:center;
+               font-weight:700; font-size:22px; color:#fff; flex-shrink:0;">
+            ${escapeHtml(letter)}
+          </div>
+
+          <div style="flex:1;">
+            <div style="font-size:16px; font-weight:700; color:#111827;">
+              ${escapeHtml(p.name)}
+            </div>
+
+            <div style="font-size:13px; color:#6B7280; margin-top:2px;">
+              ${p.email ? escapeHtml(p.email) : "No email set"}
+            </div>
+
+            ${p.notes ? `
+              <div style="font-size:12px; color:#9CA3AF; margin-top:4px;">
+                ${escapeHtml(p.notes)}
+              </div>
+            ` : ""}
+
+            <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;">
+              <span style="background:${inactive ? "#F3F4F6" : "#EFF6FF"};
+                    color:${inactive ? "#4B5563" : "#1D4ED8"};
+                    font-size:12px; font-weight:600; padding:5px 12px; border-radius:999px;">
+                ${devCount} device${devCount !== 1 ? "s" : ""}
+              </span>
+
+              <span style="background:#F9FAFB; color:#374151; font-size:12px;
+                    font-weight:600; padding:5px 12px; border-radius:999px;">
+                Top Category: ${escapeHtml(topCategory)}
+              </span>
+
+              <span style="background:#F9FAFB; color:#374151; font-size:12px;
+                    font-weight:600; padding:5px 12px; border-radius:999px;">
+                Last Activity: ${escapeHtml(latestActivity)}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <button class="btn" onclick="window.location.href='/profiles/${p.id}'">
+            View Details
+          </button>
+          <button class="btn" onclick="window.location.href='/profiles/${p.id}#profile-analytics'">
+            Analytics
+          </button>
+          <button class="btn" onclick="editProfile(${i})">Edit</button>
+          <button class="btn btn-danger" onclick="deleteProfile(${p.id})">Delete</button>
+        </div>
+
+      </div>
+    </div>`;
+  }).join("");
+}
+
+async function createProfile() {
+  const name = prompt("Profile name? (e.g. Ahmed, Sarah)");
+  if (!name || !name.trim()) return;
+
+  const email = prompt("Email (optional — press Enter to skip):") || "";
+  const notes = prompt("Notes (optional — press Enter to skip):") || "";
+
+  try {
+    const data = await api("/api/managed-users", {
+      method: "POST",
+      body: JSON.stringify({
+        name: name.trim(),
+        email: email.trim() || null,
+        notes: notes.trim() || null
+      })
+    });
+    if (!data.ok) throw new Error(data.error || "Failed");
+    await loadProfiles();
+  } catch (e) {
+    showError("Failed to create profile: " + e.message);
+  }
+}
+
+async function editProfile(index) {
+  const p = profileCache[index];
+  if (!p) return;
+
+  const name = prompt("Edit name:", p.name || "");
+  if (!name || !name.trim()) return;
+
+  const email = prompt("Edit email:", p.email || "");
+  const notes = prompt("Edit notes:", p.notes || "");
+
+  try {
+    const data = await api(`/api/managed-users/${p.id}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        name: name.trim(),
+        email: email.trim() || null,
+        notes: notes.trim() || null
+      })
+    });
+    if (!data.ok) throw new Error(data.error || "Failed");
+    await loadProfiles();
+  } catch (e) {
+    showError("Failed to update profile: " + e.message);
+  }
+}
+
+async function deleteProfile(id) {
+  if (!confirm("Delete this profile? This will unlink all their devices.")) return;
+  try {
+    const data = await api(`/api/managed-users/${id}`, { method: "DELETE" });
+    if (!data.ok) throw new Error(data.error || "Failed");
+    await loadProfiles();
+  } catch (e) {
+    showError("Failed to delete profile: " + e.message);
+  }
+}
+
+window.createProfile = createProfile;
+window.editProfile = editProfile;
+window.deleteProfile = deleteProfile;
+
+document.addEventListener("DOMContentLoaded", loadProfiles);
+</script>
+
+<style>
+.topbar { display:flex; align-items:flex-start; justify-content:space-between;
+          gap:14px; margin-bottom:20px; flex-wrap:wrap; }
+.heading h1 { margin:0; font-size:22px; font-weight:800; color:#ffffff; }
+.heading p  { margin-top:6px; color:rgba(255,255,255,0.82); font-size:13px; }
+.btn-primary { background:#0B0F19; color:white; border:0; border-radius:10px;
+               padding:10px 16px; font-weight:600; cursor:pointer; }
+.card { background:white; border-radius:14px; padding:16px;
+        border:1px solid #E9EEF5; }
+.btn { border:1px solid #E9EEF5; background:white; padding:7px 12px;
+       border-radius:10px; font-size:13px; cursor:pointer; }
+.btn-danger { color:#EF4444; }
+.skeleton { color:#6B7280; padding:20px; font-size:14px; }
+</style>
+
+{% endblock %}

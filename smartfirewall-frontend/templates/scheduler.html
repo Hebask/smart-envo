@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+{% block title %}Scheduler - Smart Environment Firewall{% endblock %}
+
+{% block content %}
+
+<header class="header">
+    <div class="header-left">
+        <h1>Internet Access Scheduler</h1>
+        <p>Create time-based rules for groups</p>
+    </div>
+</header>
+
+<div class="card" style="margin-top: 20px;">
+    <h3 class="card-title">Create New Schedule</h3>
+    <form id="scheduleForm" style="display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:16px;margin-top:16px;">
+        <div>
+            <label style="display:block;font-weight:600;margin-bottom:8px;">Group</label>
+            <select id="group_id" class="input"></select>
+        </div>
+
+        <div>
+            <label style="display:block;font-weight:600;margin-bottom:8px;">Action</label>
+            <select id="action" class="input">
+                <option value="allow">Allow</option>
+                <option value="block">Block</option>
+            </select>
+        </div>
+
+        <div>
+            <label style="display:block;font-weight:600;margin-bottom:8px;">Start Time</label>
+            <input id="start_time" type="time" class="input" required>
+        </div>
+
+        <div>
+            <label style="display:block;font-weight:600;margin-bottom:8px;">End Time</label>
+            <input id="end_time" type="time" class="input" required>
+        </div>
+
+        <div style="grid-column:1 / -1;">
+            <label style="display:block;font-weight:600;margin-bottom:8px;">Days</label>
+            <div class="days-row">
+                <label><input type="checkbox" name="days" value="mon" checked> Mon</label>
+                <label><input type="checkbox" name="days" value="tue" checked> Tue</label>
+                <label><input type="checkbox" name="days" value="wed" checked> Wed</label>
+                <label><input type="checkbox" name="days" value="thu" checked> Thu</label>
+                <label><input type="checkbox" name="days" value="fri" checked> Fri</label>
+                <label><input type="checkbox" name="days" value="sat" checked> Sat</label>
+                <label><input type="checkbox" name="days" value="sun" checked> Sun</label>
+            </div>
+        </div>
+
+        <div style="grid-column:1 / -1;">
+            <button type="submit" class="btn btn-primary">Create Schedule</button>
+        </div>
+    </form>
+</div>
+
+<div class="card" style="margin-top: 20px;">
+    <div class="card-header">
+      <h3 class="card-title">Schedules (<span id="schedule-count">0</span>)</h3>
+    </div>
+    <div id="scheduleGrid" class="schedule-grid" style="margin-top:16px;"></div>
+</div>
+
+<script>
+const form = document.getElementById("scheduleForm");
+let currentSchedules = [];
+let currentGroups = [];
+
+async function api(path, options = {}) {
+    return await apiFetch(path, options);
+}
+
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+async function loadGroups() {
+    const data = await api("/api/groups", { method: "GET" });
+    currentGroups = Array.isArray(data) ? data : (data.groups || []);
+    const select = document.getElementById("group_id");
+
+    if (!currentGroups.length) {
+        select.innerHTML = '<option value="">No groups found</option>';
+        return;
+    }
+
+    select.innerHTML = currentGroups.map(g =>
+        `<option value="${g.id}">${escapeHtml(g.name)}</option>`
+    ).join("");
+}
+
+function renderSchedules(schedules) {
+    currentSchedules = schedules || [];
+    const grid = document.getElementById("scheduleGrid");
+    const countEl = document.getElementById("schedule-count");
+    if (countEl) countEl.textContent = currentSchedules.length;
+
+    if (!currentSchedules.length) {
+        grid.innerHTML = `<div class="schedule-card"><div class="schedule-name">No schedules yet</div></div>`;
+        return;
+    }
+
+    grid.innerHTML = currentSchedules.map(s => {
+        const enabled = Number(s.enabled) === 1 || s.enabled === true;
+        const days = String(s.days || "").split(",").map(x => x.trim()).filter(Boolean).join(", ");
+        return `
+        <div class="schedule-card">
+            <div class="schedule-header">
+                <div class="schedule-name">${escapeHtml(s.group_name || ("Group " + s.group_id))}</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="btn btn-outline" onclick="toggleSchedule(${s.id}, ${enabled ? "'disable'" : "'enable'"})">
+                        ${enabled ? "Disable" : "Enable"}
+                    </button>
+                    <button class="btn btn-outline" onclick="editSchedule(${s.id})">Edit</button>
+                    <button class="btn btn-danger" onclick="deleteSchedule(${s.id})">Delete</button>
+                </div>
+            </div>
+
+            <div style="margin-top:10px;color:#475569;font-size:14px;">
+                <div><strong>Action:</strong> ${escapeHtml(s.action)}</div>
+                <div><strong>Time:</strong> ${escapeHtml(s.start_time)} - ${escapeHtml(s.end_time)}</div>
+                <div><strong>Days:</strong> ${escapeHtml(days)}</div>
+                <div><strong>Status:</strong> ${enabled ? "Enabled" : "Disabled"}</div>
+            </div>
+        </div>`;
+    }).join("");
+}
+
+async function loadSchedules() {
+    const data = await api("/api/schedules", { method: "GET" });
+    const schedules = Array.isArray(data) ? data : (data.schedules || []);
+    renderSchedules(schedules);
+}
+
+form?.addEventListener("submit", async function (e) {
+    e.preventDefault();
+
+    const group_id = document.getElementById("group_id").value;
+    const action = document.getElementById("action").value;
+    const start_time = document.getElementById("start_time").value;
+    const end_time = document.getElementById("end_time").value;
+    const days = Array.from(document.querySelectorAll('input[name="days"]:checked')).map(x => x.value);
+
+    if (!group_id || !start_time || !end_time || !days.length) {
+        alert("Please fill all required fields.");
+        return;
+    }
+
+    try {
+        await api("/api/schedules", {
+            method: "POST",
+            body: JSON.stringify({
+                group_id: Number(group_id),
+                action,
+                start_time,
+                end_time,
+                days
+            })
+        });
+
+        form.reset();
+        document.querySelectorAll('input[name="days"]').forEach(cb => cb.checked = true);
+        await loadGroups();
+        await loadSchedules();
+        alert("Schedule created successfully.");
+    } catch (e) {
+        console.error(e);
+        alert("Failed to create schedule.");
+    }
+});
+
+async function toggleSchedule(id, mode) {
+    try {
+        await api(`/api/schedules/${id}/${mode}`, { method: "POST" });
+        await loadSchedules();
+    } catch (e) {
+        console.error(e);
+        alert("Failed to update schedule status.");
+    }
+}
+
+async function editSchedule(id) {
+    const s = currentSchedules.find(x => String(x.id) === String(id));
+    if (!s) return alert("Schedule not found.");
+
+    const start_time = prompt("Start time (HH:MM):", s.start_time || "");
+    if (start_time === null) return;
+
+    const end_time = prompt("End time (HH:MM):", s.end_time || "");
+    if (end_time === null) return;
+
+    const action = prompt("Action (allow/block):", s.action || "allow");
+    if (action === null) return;
+
+    const days = prompt("Days (comma separated like mon,tue,wed):", s.days || "mon,tue,wed,thu,fri,sat,sun");
+    if (days === null) return;
+
+    try {
+        await api(`/api/schedules/${id}`, {
+            method: "PUT",
+            body: JSON.stringify({
+                group_id: Number(s.group_id),
+                start_time,
+                end_time,
+                action: action.trim().toLowerCase(),
+                days: days.split(",").map(x => x.trim().toLowerCase()).filter(Boolean),
+                enabled: Number(s.enabled) === 1 || s.enabled === true
+            })
+        });
+        await loadSchedules();
+        alert("Schedule updated.");
+    } catch (e) {
+        console.error(e);
+        alert("Failed to update schedule.");
+    }
+}
+
+async function deleteSchedule(id) {
+    if (!confirm("Delete this schedule?")) return;
+
+    try {
+        await api(`/api/schedules/${id}`, { method: "DELETE" });
+        await loadSchedules();
+        alert("Schedule deleted.");
+    } catch (e) {
+        console.error(e);
+        alert("Failed to delete schedule.");
+    }
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+    try {
+        await loadGroups();
+        await loadSchedules();
+    } catch (e) {
+        console.error(e);
+        alert("Failed to load scheduler data.");
+    }
+});
+</script>
+
+<style>
+.input {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1px solid #dbe2ea;
+    border-radius: 10px;
+    background: #fff;
+}
+.days-row {
+    display:flex;
+    gap:12px;
+    flex-wrap:wrap;
+}
+.days-row label {
+    background:#f8fafc;
+    border:1px solid #e2e8f0;
+    border-radius:10px;
+    padding:8px 10px;
+}
+.schedule-grid {
+    display:flex;
+    flex-direction:column;
+    gap:16px;
+}
+.schedule-card {
+    background:#fff;
+    border:1px solid #e2e8f0;
+    border-radius:14px;
+    padding:16px;
+}
+.schedule-header {
+    display:flex;
+    justify-content:space-between;
+    gap:12px;
+    align-items:center;
+    flex-wrap:wrap;
+}
+.schedule-name {
+    font-size:18px;
+    font-weight:700;
+}
+</style>
+
+{% endblock %}

@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+iot.db
+.gunicorn/
+.env
+*.log
+smartfirewall-backend-backup-*/
+backup_before_fixes/

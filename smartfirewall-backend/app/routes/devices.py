@@ -1,0 +1,705 @@
+from flask import Blueprint, jsonify, request
+from datetime import datetime
+
+from app.auth import require_admin
+from app.db import get_db
+from app.services.audit import log_action
+from app.services.alerts import create_alert
+from app.services.discovery import upsert_devices_from_leases
+from app.services.firewall import (
+    enforce_pending_block,
+    set_internet_block,
+    set_dns_filter,
+    persist_rules,
+)
+from app.services.policy import (
+    latest_active_group_per_device,
+    enforce_policies_periodic,
+    pending_should_block,
+)
+from app.services.runtime_settings import is_setting_enabled
+from app.services.usage import ensure_usage_rules_for_all_devices
+
+bp = Blueprint("devices", __name__)
+
+
+def _normalize_mac(mac: str) -> str:
+    return (mac or "").lower().strip()
+
+
+def _get_device_row(mac: str):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM devices WHERE lower(mac)=?", (_normalize_mac(mac),))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def _pending_effective_state(approved: int, manual_block: int, manual_dns: int):
+    should_block = pending_should_block(approved, manual_block)
+    if should_block:
+        return {
+            "effective_internet_blocked": 1,
+            "effective_dns_filtered": int(manual_dns),
+            "effective_reason": "pending_blocked",
+        }
+    return {
+        "effective_internet_blocked": 0,
+        "effective_dns_filtered": int(manual_dns),
+        "effective_reason": "pending_review",
+    }
+
+@bp.route("/api/devices/sync", methods=["POST"])
+@require_admin
+def devices_sync():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT mac FROM devices")
+    before_macs = {r["mac"].lower() for r in cur.fetchall()}
+    conn.close()
+
+    upsert_devices_from_leases()
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT mac, approved, internet_blocked, name, last_ip FROM devices")
+    devices = cur.fetchall()
+    conn.close()
+
+    new_devices = []
+
+    for d in devices:
+        mac = d["mac"].lower()
+        approved = int(d["approved"])
+        manual_block = int(d["internet_blocked"])
+        enforce_pending_block(
+            mac,
+            should_block=pending_should_block(approved, manual_block),
+        )
+
+        if mac not in before_macs:
+            new_devices.append({
+                "mac": mac,
+                "name": d["name"] or "Unnamed Device",
+                "last_ip": d["last_ip"] or "",
+            })
+
+    ensure_usage_rules_for_all_devices()
+    persist_rules()
+
+    for nd in new_devices:
+        create_alert(
+            level="warning",
+            category="device",
+            title="New device discovered",
+            message=f"New device detected: {nd['name']} ({nd['mac']}) at {nd['last_ip']}.",
+            device_mac=nd["mac"],
+            related_type="device",
+            related_id=nd["mac"],
+            send_email=True,
+        )
+
+    log_action(
+        action="device.sync",
+        target_type="device",
+        target_id="",
+        payload={"synced": len(devices), "new_devices": len(new_devices)},
+    )
+
+    return jsonify({"ok": True, "synced": len(devices), "new_devices": len(new_devices)})
+
+@bp.route("/api/devices", methods=["GET"])
+@require_admin
+def devices_list():
+    upsert_devices_from_leases()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM devices ORDER BY last_seen DESC")
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return jsonify(rows)
+
+
+@bp.route("/api/devices/<mac>", methods=["GET"])
+@require_admin
+def device_get(mac):
+    mac = _normalize_mac(mac)
+    upsert_devices_from_leases()
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM devices WHERE lower(mac)=?", (mac,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"ok": False, "error": "device not found"}), 404
+
+    device = dict(row)
+
+    cur.execute("""
+        SELECT g.id, g.name,
+               g.internet_blocked, g.dns_filtered,
+               COALESCE(ag.active, 0) AS active,
+               ag.activated_at
+        FROM group_members gm
+        JOIN groups g ON g.id = gm.group_id
+        LEFT JOIN active_groups ag ON ag.group_id = g.id
+        WHERE gm.device_mac=?
+        ORDER BY COALESCE(ag.activated_at, '') DESC, g.name ASC
+    """, (mac,))
+    groups = [dict(r) for r in cur.fetchall()]
+
+    winner = None
+    for g in groups:
+        if int(g.get("active", 0)) == 1 and g.get("activated_at"):
+            winner = g
+            break
+
+    conn.close()
+
+    return jsonify({
+        "ok": True,
+        "device": device,
+        "groups": groups,
+        "winner": winner,
+    })
+
+
+@bp.route("/api/devices/effective", methods=["GET"])
+@require_admin
+def devices_effective():
+    winners = latest_active_group_per_device()
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM devices ORDER BY last_seen DESC")
+    devices = [dict(r) for r in cur.fetchall()]
+
+    group_names = {}
+    if winners:
+        ids = sorted({int(v["group_id"]) for v in winners.values()})
+        qmarks = ",".join(["?"] * len(ids))
+        cur.execute(f"SELECT id, name FROM groups WHERE id IN ({qmarks})", ids)
+        group_names = {int(r["id"]): r["name"] for r in cur.fetchall()}
+
+    cur.execute("SELECT * FROM schedules WHERE enabled=1 ORDER BY id DESC")
+    schedules = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    sched_by_group = {}
+    for s in schedules:
+        gid = int(s["group_id"])
+        sched_by_group.setdefault(gid, []).append(s)
+
+    now_hhmm = datetime.now().strftime("%H:%M")
+    day = datetime.now().strftime("%a").lower()[:3]
+
+    def time_in_window(start_hhmm, end_hhmm, now_hhmm):
+        if start_hhmm <= end_hhmm:
+            return start_hhmm <= now_hhmm <= end_hhmm
+        return now_hhmm >= start_hhmm or now_hhmm <= end_hhmm
+
+    out = []
+    firewall_enabled = is_setting_enabled("firewall_enabled", True)
+    for d in devices:
+        mac = d["mac"].lower()
+        w = winners.get(mac)
+
+        if w:
+            gid = int(w["group_id"])
+            d["winner_group_id"] = gid
+            d["winner_group_name"] = group_names.get(gid, f"Group {gid}")
+            d["winner_activated_at"] = w["activated_at"]
+            d["winner_internet_blocked"] = int(w["internet_blocked"])
+            d["winner_dns_filtered"] = int(w["dns_filtered"])
+        else:
+            d["winner_group_id"] = None
+            d["winner_group_name"] = None
+            d["winner_activated_at"] = None
+            d["winner_internet_blocked"] = None
+            d["winner_dns_filtered"] = None
+
+        d["schedule_active"] = False
+        d["schedule_action"] = None
+        d["schedule_id"] = None
+
+        approved = int(d.get("approved", 0))
+        manual_block = int(d.get("internet_blocked", 0))
+        manual_dns = int(d.get("dns_filtered", 0))
+
+        if not firewall_enabled:
+            d["effective_internet_blocked"] = 0
+            d["effective_dns_filtered"] = 0
+            d["effective_reason"] = "firewall_disabled"
+            out.append(d)
+            continue
+
+        if approved == 0:
+            d.update(_pending_effective_state(approved, manual_block, manual_dns))
+            out.append(d)
+            continue
+
+        if manual_block == 1:
+            d["effective_internet_blocked"] = 1
+            d["effective_dns_filtered"] = manual_dns
+            d["effective_reason"] = "manual_block"
+            out.append(d)
+            continue
+
+        if not w:
+            d["effective_internet_blocked"] = 0
+            d["effective_dns_filtered"] = manual_dns
+            d["effective_reason"] = "no_active_group"
+            out.append(d)
+            continue
+
+        base_block = int(w["internet_blocked"])
+        base_dns = int(w["dns_filtered"])
+
+        eff_block = base_block
+        eff_dns = 1 if (manual_dns == 1 or base_dns == 1) else 0
+        reason = "winner_group"
+
+        gid = int(w["group_id"])
+        for s in sched_by_group.get(gid, []):
+            days = [x.strip() for x in (s.get("days") or "").split(",") if x.strip()]
+            if day not in days:
+                continue
+
+            active = time_in_window(s["start_time"], s["end_time"], now_hhmm)
+            if not active:
+                continue
+
+            d["schedule_active"] = True
+            d["schedule_action"] = s["action"]
+            d["schedule_id"] = s["id"]
+
+            if s["action"] == "allow":
+                eff_block = 0
+                eff_dns = manual_dns
+                reason = "schedule_allow"
+            else:
+                eff_block = 1
+                eff_dns = 1 if (manual_dns == 1 or base_dns == 1) else 0
+                reason = "schedule_block"
+
+            break
+
+        d["effective_internet_blocked"] = eff_block
+        d["effective_dns_filtered"] = eff_dns
+        d["effective_reason"] = reason
+
+        out.append(d)
+
+    return jsonify({"ok": True, "devices": out})
+
+
+@bp.route("/api/devices/<mac>/groups", methods=["GET"])
+@require_admin
+def device_groups(mac):
+    mac = _normalize_mac(mac)
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT g.id, g.name,
+               g.internet_blocked, g.dns_filtered,
+               COALESCE(ag.active, 0) AS active,
+               ag.activated_at
+        FROM group_members gm
+        JOIN groups g ON g.id = gm.group_id
+        LEFT JOIN active_groups ag ON ag.group_id = g.id
+        WHERE gm.device_mac=?
+        ORDER BY COALESCE(ag.activated_at, '') DESC, g.name ASC
+    """, (mac,))
+    groups = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    winner = None
+    for g in groups:
+        if int(g.get("active", 0)) == 1 and g.get("activated_at"):
+            winner = g
+            break
+
+    return jsonify({"ok": True, "mac": mac, "groups": groups, "winner": winner})
+
+
+@bp.route("/api/devices/<mac>/groups", methods=["POST"])
+@require_admin
+def device_add_group(mac):
+    mac = _normalize_mac(mac)
+
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "json required"}), 400
+
+    group_id = request.json.get("group_id")
+    try:
+        group_id = int(group_id)
+    except Exception:
+        return jsonify({"ok": False, "error": "valid group_id required"}), 400
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT 1 FROM devices WHERE lower(mac)=?", (mac,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"ok": False, "error": "device not found"}), 404
+
+    cur.execute("SELECT 1 FROM groups WHERE id=?", (group_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"ok": False, "error": "group not found"}), 404
+
+    cur.execute(
+        "INSERT OR IGNORE INTO group_members(group_id, device_mac) VALUES(?,?)",
+        (group_id, mac),
+    )
+    changed = cur.rowcount
+
+    conn.commit()
+    conn.close()
+
+    persist_rules()
+    enforce_policies_periodic()
+
+    log_action(
+        action="device.add_group",
+        target_type="device",
+        target_id=mac,
+        payload={"group_id": group_id},
+    )
+
+    create_alert(
+        level="info",
+        category="device",
+        title="Device added to group",
+        message=f"Device {mac} was added to group {group_id}.",
+        device_mac=mac,
+        related_type="group",
+        related_id=group_id,
+        send_email=False,
+    )
+
+    return jsonify({
+        "ok": True,
+        "mac": mac,
+        "group_id": group_id,
+        "added": 1 if changed > 0 else 0,
+    })
+
+
+@bp.route("/api/devices/<mac>/groups/<int:group_id>", methods=["DELETE"])
+@require_admin
+def device_remove_group(mac, group_id):
+    mac = _normalize_mac(mac)
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM group_members WHERE device_mac=? AND group_id=?",
+        (mac, group_id),
+    )
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    persist_rules()
+    enforce_policies_periodic()
+
+    log_action(
+        action="device.remove_group",
+        target_type="device",
+        target_id=mac,
+        payload={"group_id": group_id},
+    )
+
+    create_alert(
+        level="info",
+        category="device",
+        title="Device removed from group",
+        message=f"Device {mac} was removed from group {group_id}.",
+        device_mac=mac,
+        related_type="group",
+        related_id=group_id,
+        send_email=False,
+    )
+
+    return jsonify({
+        "ok": True,
+        "mac": mac,
+        "group_id": group_id,
+        "removed": changed,
+    })
+
+
+@bp.route("/api/devices/<mac>/approve", methods=["POST"])
+@require_admin
+def device_approve(mac):
+    mac = _normalize_mac(mac)
+    approved = 1 if (request.is_json and request.json.get("approved", True)) else 0
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE devices SET approved=? WHERE mac=?", (approved, mac))
+    conn.commit()
+    conn.close()
+
+    row = _get_device_row(mac) or {"internet_blocked": 0}
+    enforce_pending_block(
+        mac,
+        should_block=pending_should_block(approved, row.get("internet_blocked", 0)),
+    )
+    persist_rules()
+    enforce_policies_periodic()
+
+    log_action(
+        action="device.approve",
+        target_type="device",
+        target_id=mac,
+        payload={"approved": approved},
+    )
+
+    create_alert(
+        level="info",
+        category="device",
+        title="Device approval updated",
+        message=f"Device {mac} approval set to {approved}.",
+        device_mac=mac,
+        related_type="device",
+        related_id=mac,
+        send_email=False,
+    )
+
+    return jsonify({"ok": True, "mac": mac, "approved": approved})
+
+
+@bp.route("/api/devices/<mac>/block_internet", methods=["POST"])
+@require_admin
+def device_block_internet(mac):
+    blocked = int(bool(request.json.get("blocked", True))) if request.is_json else 1
+    mac = _normalize_mac(mac)
+
+    set_internet_block(mac, blocked == 1)
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE devices SET internet_blocked=? WHERE mac=?", (blocked, mac))
+    conn.commit()
+    conn.close()
+
+    persist_rules()
+    enforce_policies_periodic()
+
+    log_action(
+        action="device.block_internet",
+        target_type="device",
+        target_id=mac,
+        payload={"blocked": blocked},
+    )
+
+    create_alert(
+        level="warning" if blocked == 1 else "info",
+        category="device",
+        title="Internet block changed",
+        message=f"Internet block for device {mac} set to {blocked}.",
+        device_mac=mac,
+        related_type="device",
+        related_id=mac,
+        send_email=(blocked == 1),
+    )
+
+    return jsonify({"ok": True, "mac": mac, "internet_blocked": blocked})
+
+
+@bp.route("/api/devices/<mac>/dns_filter", methods=["POST"])
+@require_admin
+def device_dns_filter(mac):
+    enabled = int(bool(request.json.get("enabled", True))) if request.is_json else 1
+    mac = _normalize_mac(mac)
+
+    set_dns_filter(mac, enabled == 1)
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE devices SET dns_filtered=? WHERE mac=?", (enabled, mac))
+    conn.commit()
+    conn.close()
+
+    persist_rules()
+    enforce_policies_periodic()
+
+    log_action(
+        action="device.dns_filter",
+        target_type="device",
+        target_id=mac,
+        payload={"enabled": enabled},
+    )
+
+    create_alert(
+        level="info",
+        category="device",
+        title="DNS filter changed",
+        message=f"DNS filter for device {mac} set to {enabled}.",
+        device_mac=mac,
+        related_type="device",
+        related_id=mac,
+        send_email=False,
+    )
+
+    return jsonify({"ok": True, "mac": mac, "dns_filtered": enabled})
+
+
+@bp.route("/api/devices/<mac>", methods=["PUT"])
+@require_admin
+def device_update(mac):
+    """
+    Update device metadata and optional policy flags.
+
+    Supported fields:
+    - name
+    - owner_label
+    - notes
+    - approved
+    - internet_blocked
+    - dns_filtered
+    """
+    mac = _normalize_mac(mac)
+
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "json required"}), 400
+
+    existing = _get_device_row(mac)
+    if not existing:
+        return jsonify({"ok": False, "error": "device not found"}), 404
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("PRAGMA table_info(devices)")
+    cols = {row["name"] for row in cur.fetchall()}
+
+    updates = []
+    values = []
+
+    if "name" in cols and "name" in request.json:
+        updates.append("name=?")
+        values.append((request.json.get("name") or "").strip())
+
+    if "owner_label" in cols and "owner_label" in request.json:
+        updates.append("owner_label=?")
+        values.append((request.json.get("owner_label") or "").strip())
+
+    if "notes" in cols and "notes" in request.json:
+        updates.append("notes=?")
+        values.append((request.json.get("notes") or "").strip())
+
+    approved = existing.get("approved", 0)
+    internet_blocked = existing.get("internet_blocked", 0)
+    dns_filtered = existing.get("dns_filtered", 0)
+
+    if "approved" in request.json and "approved" in cols:
+        approved = 1 if bool(request.json.get("approved")) else 0
+        updates.append("approved=?")
+        values.append(approved)
+
+    if "internet_blocked" in request.json and "internet_blocked" in cols:
+        internet_blocked = 1 if bool(request.json.get("internet_blocked")) else 0
+        updates.append("internet_blocked=?")
+        values.append(internet_blocked)
+
+    if "dns_filtered" in request.json and "dns_filtered" in cols:
+        dns_filtered = 1 if bool(request.json.get("dns_filtered")) else 0
+        updates.append("dns_filtered=?")
+        values.append(dns_filtered)
+
+    if not updates:
+        conn.close()
+        return jsonify({"ok": False, "error": "no valid fields to update"}), 400
+
+    values.append(mac)
+    cur.execute(f"UPDATE devices SET {', '.join(updates)} WHERE mac=?", values)
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    enforce_pending_block(mac, should_block=pending_should_block(approved, internet_blocked))
+    set_internet_block(mac, internet_blocked == 1)
+    set_dns_filter(mac, dns_filtered == 1)
+    persist_rules()
+    enforce_policies_periodic()
+
+    log_action(
+        action="device.update",
+        target_type="device",
+        target_id=mac,
+        payload=request.json,
+    )
+
+    create_alert(
+        level="info",
+        category="device",
+        title="Device details updated",
+        message=f"Device {mac} details were updated.",
+        device_mac=mac,
+        related_type="device",
+        related_id=mac,
+        send_email=False,
+    )
+
+    return jsonify({
+        "ok": True,
+        "mac": mac,
+        "updated": changed,
+        "approved": approved,
+        "internet_blocked": internet_blocked,
+        "dns_filtered": dns_filtered,
+    })
+
+@bp.route("/api/devices/<mac>", methods=["DELETE"])
+@require_admin
+def device_delete(mac):
+    """
+    Remove a device from the dashboard database.
+    Note: this removes DB metadata and group memberships, not physical device presence.
+    """
+    mac = _normalize_mac(mac)
+
+    set_internet_block(mac, False)
+    set_dns_filter(mac, False)
+    enforce_pending_block(mac, should_block=False)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM group_members WHERE device_mac=?", (mac,))
+    cur.execute("DELETE FROM devices WHERE mac=?", (mac,))
+    changed = cur.rowcount
+
+    conn.commit()
+    conn.close()
+
+    persist_rules()
+    enforce_policies_periodic()
+
+    log_action(
+        action="device.delete",
+        target_type="device",
+        target_id=mac,
+        payload={},
+    )
+
+    create_alert(
+        level="warning",
+        category="device",
+        title="Device removed",
+        message=f"Device {mac} was removed from the dashboard records.",
+        device_mac=mac,
+        related_type="device",
+        related_id=mac,
+        send_email=False,
+    )
+
+    return jsonify({"ok": True, "mac": mac, "deleted": changed})

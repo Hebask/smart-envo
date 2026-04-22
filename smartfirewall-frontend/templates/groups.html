@@ -1,0 +1,442 @@
+{% extends "base.html" %}
+{% block title %}smart-envo Groups{% endblock %}
+{% block content %}
+
+<div class="topbar">
+  <div class="heading">
+<h1>smart-envo Groups</h1>
+<p>Organize devices and apply group-based restrictions</p>
+  </div>
+
+  <button class="btn-primary" onclick="createGroup()">Create Group</button>
+</div>
+
+<div id="groups-container"></div>
+
+<script>
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+async function api(path, options = {}) {
+  return await apiFetch(path, options);
+}
+
+function normalizeGroupsResponse(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.groups)) return data.groups;
+  if (Array.isArray(data?.items)) return data.items;
+  return [];
+}
+
+function normalizeActiveGroupsResponse(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.groups)) return data.groups;
+  if (Array.isArray(data?.items)) return data.items;
+  if (data && typeof data === "object" && data.id != null) return [data];
+  return [];
+}
+
+async function loadGroups() {
+  try {
+    const [groupsData, activeGroupsData] = await Promise.all([
+      api("/api/groups", { method: "GET" }),
+      api("/api/groups/active", { method: "GET" })
+    ]);
+
+    const groups = normalizeGroupsResponse(groupsData);
+    const activeGroups = normalizeActiveGroupsResponse(activeGroupsData);
+    const activeIds = new Set(activeGroups.map(g => String(g.id)));
+
+    const groupsWithCounts = await Promise.all(
+      groups.map(async (g) => {
+        try {
+          const membersData = await api(`/api/groups/${encodeURIComponent(g.id)}/members`, {
+            method: "GET"
+          });
+          const members = Array.isArray(membersData?.members) ? membersData.members : [];
+          return { ...g, members_count: members.length, members };
+        } catch {
+          return { ...g, members_count: 0, members: [] };
+        }
+      })
+    );
+
+    renderGroups(groupsWithCounts, activeIds);
+  } catch (e) {
+    console.error(e);
+    alert("Backend down or cannot load groups.");
+  }
+}
+
+function buildGroupCard(group, isActive) {
+  const id = group.id;
+  const name = group.name || "Group";
+  const membersCount = Number(group.members_count || 0);
+  const internetBlocked = Number(group.internet_blocked) === 1 ? "Yes" : "No";
+  const dnsFiltered = Number(group.dns_filtered) === 1 ? "Yes" : "No";
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "card";
+  wrapper.setAttribute("data-group-id", id);
+
+  wrapper.innerHTML = `
+    <div class="card-header">
+      <div class="group-title">
+        <b>${escapeHtml(name)}</b>
+        ${isActive ? `<span style="margin-left:10px;background:#22c55e;color:white;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;">ACTIVE</span>` : ``}
+      </div>
+
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="pill">${membersCount} members</span>
+        <button class="btn" onclick="editGroup('${id}')">Edit</button>
+        <button class="btn btn-danger" onclick="deleteGroup('${id}')">Delete</button>
+      </div>
+    </div>
+
+    <div class="rules">
+      <div class="rule blue">
+        <b>Internet Blocked</b>
+        <span>${internetBlocked}</span>
+      </div>
+
+      <div class="rule purple">
+        <b>DNS Filtering</b>
+        <span>${dnsFiltered}</span>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
+      <button class="btn" onclick="addMember('${id}')">Add Member</button>
+      <button class="btn btn-danger" onclick="removeMember('${id}')">Remove Member</button>
+      <button class="btn" onclick="addDomain('${id}')">Add Domain</button>
+      <button class="btn" onclick="applyGroup('${id}')">Apply</button>
+      <button class="btn btn-danger" onclick="deactivateGroup('${id}')">Deactivate</button>
+      <button class="btn" onclick="viewAnalytics('${id}')">View Content Analytics</button>
+    </div>
+  `;
+
+  return wrapper;
+}
+
+function renderGroups(groups, activeIds) {
+  const container = document.getElementById("groups-container");
+  if (!container) return;
+
+  container.innerHTML = "";
+
+  if (!groups.length) {
+    container.innerHTML = `<div class="card"><b>No groups yet.</b></div>`;
+    return;
+  }
+
+  groups.forEach(g => {
+    const card = buildGroupCard(g, activeIds.has(String(g.id)));
+    container.appendChild(card);
+  });
+}
+
+async function createGroup() {
+  const name = prompt("Group name?");
+  if (!name) return;
+
+  const internetBlocked = confirm("Should internet be blocked for this group?");
+  const dnsFiltered = confirm("Should DNS filtering be enabled for this group?");
+
+  try {
+    await api("/api/groups", {
+      method: "POST",
+      body: JSON.stringify({
+        name: name.trim(),
+        internet_blocked: internetBlocked,
+        dns_filtered: dnsFiltered
+      })
+    });
+    await loadGroups();
+  } catch (e) {
+    console.error(e);
+    alert("Failed to create group.");
+  }
+}
+
+async function addMember(groupId) {
+  try {
+    const devicesData = await api("/api/devices", { method: "GET" });
+    const devices = Array.isArray(devicesData) ? devicesData : (devicesData.devices || []);
+
+    let message = "Type the exact MAC address to add:\n\n";
+    devices.forEach(d => {
+      const mac = d.mac || "";
+      const name = d.name || "Unknown Device";
+      const ip = d.last_ip || "-";
+      if (mac) message += `- ${name} | ${mac} | ${ip}\n`;
+    });
+
+    const mac = prompt(message);
+    if (!mac) return;
+
+    await api(`/api/groups/${encodeURIComponent(groupId)}/members`, {
+      method: "POST",
+      body: JSON.stringify({ mac: mac.trim().toLowerCase() })
+    });
+
+    await loadGroups();
+    alert("Member added.");
+  } catch (e) {
+    console.error(e);
+    alert("Failed to add member.");
+  }
+}
+
+async function removeMember(groupId) {
+  try {
+    const data = await api(`/api/groups/${encodeURIComponent(groupId)}/members`, { method: "GET" });
+    const members = Array.isArray(data?.members) ? data.members : [];
+
+    if (!members.length) {
+      alert("No members in this group.");
+      return;
+    }
+
+    let message = "Type the exact MAC address to remove:\n\n";
+    members.forEach(m => {
+      message += `- ${m.name || "Unknown"} | ${m.device_mac} | ${m.last_ip || "-"}\n`;
+    });
+
+    const mac = prompt(message);
+    if (!mac) return;
+
+    await api(`/api/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(mac.trim().toLowerCase())}`, {
+      method: "DELETE"
+    });
+
+    await loadGroups();
+    alert("Member removed.");
+  } catch (e) {
+    console.error(e);
+    alert("Failed to remove member.");
+  }
+}
+
+async function addDomain(groupId) {
+  const domain = prompt("Domain to block for this group (example: tiktok.com)?");
+  if (!domain) return;
+
+  try {
+    await api(`/api/groups/${encodeURIComponent(groupId)}/domains`, {
+      method: "POST",
+      body: JSON.stringify({ domain: domain.trim() })
+    });
+    await loadGroups();
+  } catch (e) {
+    console.error(e);
+    alert("Failed to add domain.");
+  }
+}
+
+async function applyGroup(groupId) {
+  const ok = confirm("Apply this group rules now?");
+  if (!ok) return;
+
+  try {
+    const res = await api(`/api/groups/${encodeURIComponent(groupId)}/apply`, {
+      method: "POST"
+    });
+    await loadGroups();
+    alert(`Group applied successfully to ${res.applied_to ?? 0} device(s).`);
+  } catch (e) {
+    console.error(e);
+    alert("Failed to apply group.");
+  }
+}
+
+async function deactivateGroup(groupId) {
+  const ok = confirm("Deactivate this group?");
+  if (!ok) return;
+
+  try {
+    await api(`/api/groups/${encodeURIComponent(groupId)}/deactivate`, {
+      method: "POST"
+    });
+    await loadGroups();
+    alert("Group deactivated.");
+  } catch (e) {
+    console.error(e);
+    alert("Failed to deactivate group.");
+  }
+}
+
+async function editGroup(groupId) {
+  try {
+    const groupsData = await api("/api/groups", { method: "GET" });
+    const groups = normalizeGroupsResponse(groupsData);
+    const group = groups.find(g => String(g.id) === String(groupId));
+
+    if (!group) {
+      alert("Group not found.");
+      return;
+    }
+
+    const name = prompt("Edit group name:", group.name || "");
+    if (name === null) return;
+
+    const internetBlocked = confirm("Should internet be blocked for this group?");
+    const dnsFiltered = confirm("Should DNS filtering be enabled for this group?");
+
+    await api(`/api/groups/${encodeURIComponent(groupId)}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        name: name.trim(),
+        internet_blocked: internetBlocked,
+        dns_filtered: dnsFiltered
+      })
+    });
+
+    await loadGroups();
+    alert("Group updated.");
+  } catch (e) {
+    console.error(e);
+    alert("Failed to update group.");
+  }
+}
+
+async function deleteGroup(groupId) {
+  const ok = confirm("Delete this group?");
+  if (!ok) return;
+
+  try {
+    await api(`/api/groups/${encodeURIComponent(groupId)}`, {
+      method: "DELETE"
+    });
+    await loadGroups();
+    alert("Group deleted.");
+  } catch (e) {
+    console.error(e);
+    alert("Failed to delete group.");
+  }
+}
+
+function viewAnalytics(groupId) {
+  window.location.href = `/analytics/${groupId}`;
+}
+
+window.createGroup = createGroup;
+window.addMember = addMember;
+window.removeMember = removeMember;
+window.addDomain = addDomain;
+window.applyGroup = applyGroup;
+window.editGroup = editGroup;
+window.deleteGroup = deleteGroup;
+window.deactivateGroup = deactivateGroup;
+window.viewAnalytics = viewAnalytics;
+
+document.addEventListener("DOMContentLoaded", loadGroups);
+</script>
+{% endblock %}
+
+
+{% block extra_css %}
+<style>
+  .topbar{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:14px;
+    margin-bottom:14px;
+  }
+
+  .heading h1{
+    margin:0;
+    font-size:24px;
+    font-weight:800;
+    color:#ffffff;
+  }
+
+  .heading p{
+    margin-top:6px;
+    color:rgba(255,255,255,0.82);
+    font-size:14px;
+  }
+
+  .btn-primary{
+    background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color:white;
+    border:0;
+    border-radius:12px;
+    padding:12px 18px;
+    font-weight:700;
+    font-size:14px;
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    box-shadow:0 8px 20px rgba(102,126,234,0.30);
+  }
+
+  .card{
+    background:white;
+    border-radius:14px;
+    padding:16px;
+    margin-top:16px;
+    border:1px solid #E9EEF5;
+  }
+
+  .card-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+  }
+
+  .group-title b{
+    font-size:14px;
+  }
+
+  .pill{
+    background:#0B0F19;
+    color:white;
+    font-size:11px;
+    padding:6px 10px;
+    border-radius:999px;
+    font-weight:700;
+  }
+
+  .btn{
+    border:1px solid #E9EEF5;
+    background:white;
+    padding:7px 10px;
+    border-radius:10px;
+    font-size:12px;
+    cursor:pointer;
+  }
+
+  .btn-danger{
+    color:#EF4444;
+  }
+
+  .rules{
+    margin-top:12px;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+  }
+
+  .rule{
+    border-radius:12px;
+    padding:12px;
+    display:flex;
+    gap:10px;
+  }
+
+  .rule.blue{background:#EAF2FF}
+  .rule.purple{background:#F3EFFF}
+  .rule.orange{background:#FFF3E6}
+
+  .rule b{font-size:13px}
+  .rule span{font-size:12px;color:#6B7280}
+</style>
+{% endblock %}

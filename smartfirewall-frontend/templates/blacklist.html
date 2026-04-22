@@ -1,0 +1,290 @@
+{% extends "base.html" %}
+{% block title %}smart-envo Domain Blocking{% endblock %}
+{% block content %}
+
+<header class="header">
+    <div class="header-left">
+        <h1>smart-envo Domain Blocking</h1>
+        <p>Manage blocked domains and DNS-level restrictions</p>
+    </div>
+</header>
+
+<div class="card">
+    <h3 class="card-title">Add Blocked Domain</h3>
+    <form id="blockRuleForm">
+        <div class="form-row">
+            
+            <div class="form-group">
+                <label class="form-label">Domain</label>
+                <input type="text" class="form-input" id="blockValue" placeholder="example.com">
+            </div>
+        </div>
+        <div class="form-row">    
+        </div>
+
+        <button type="submit" class="btn btn-danger">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
+            </svg>
+            Block Domain
+        </button>
+    </form>
+</div>
+
+<div class="card" style="margin-top: 20px;">
+    <div class="card-header">
+<h3 class="card-title">Blocked Domain (<span id="rules-count">0</span>)</h3>
+        <div style="display: flex; gap: 10px;">
+            <button class="btn btn-outline">Export Rules</button>
+            <button class="btn btn-outline">Import Rules</button>
+        </div>
+    </div>
+
+    <div class="block-rules-grid">
+        {{ super() }}
+    </div>
+</div>
+
+<script>
+const API_BASE = window.API_BASE;
+async function api(path, options = {}) { return await apiFetch(path, options); }
+
+const form = document.getElementById("blockRuleForm");
+const rulesGrid = document.querySelector(".block-rules-grid");
+
+function showError(msg) {
+  alert(msg);
+}
+
+async function loadDomains() {
+  try {
+    const data = await api("/api/domains", { method: "GET" });
+    const domains = Array.isArray(data) ? data : (data.domains || data.items || []);
+    renderDomains(domains);
+  } catch (e) {
+    console.error(e);
+    showError("Backend down or cannot load blacklist domains.");
+  }
+}
+
+function isEnabledValue(v) {
+  return v === true || v === 1 || v === "1";
+}
+
+function renderDomains(domains) {
+  if (!rulesGrid) return;
+
+  rulesGrid.innerHTML = "";
+
+  const countEl = document.getElementById("rules-count");
+  if (countEl) countEl.textContent = domains.length;
+
+  if (!domains || domains.length === 0) {
+    rulesGrid.innerHTML = `
+      <div class="block-rule-item" style="justify-content:center;">
+        <div class="rule-info">
+          <h4>No blocked domains yet</h4>
+          <div class="rule-meta">
+            <span>Add your first rule above.</span>
+          </div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  domains.forEach(d => {
+    const id = d.id;
+    const domain = d.domain || d.value || d.url || "unknown";
+    const enabled = isEnabledValue(d.enabled);
+    const added = d.created_at || d.added_at || "";
+
+    const item = document.createElement("div");
+    item.className = "block-rule-item";
+
+    item.innerHTML = `
+      <div class="rule-info">
+        <h4>${escapeHtml(domain)}</h4>
+        <div class="rule-meta">
+          <span>🌐 ${enabled ? "Active" : "Disabled"}</span>
+          ${added ? `<span>📅 Added: ${escapeHtml(added)}</span>` : ""}
+        </div>
+      </div>
+
+      <div style="display:flex; gap:10px; align-items:center;">
+        <div class="rule-actions">
+          ${
+            enabled
+              ? `<button class="btn-icon danger" title="Disable" onclick="disableDomain(${id})">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
+                  </svg>
+                </button>`
+              : `<button class="btn-icon" title="Enable" onclick="enableDomain(${id})">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                </button>`
+          }
+
+          <button class="btn-icon danger" title="Delete" onclick="deleteDomain(${id})">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+    `;
+
+    rulesGrid.appendChild(item);
+  });
+}
+
+form?.addEventListener("submit", async function (e) {
+  e.preventDefault();
+
+  const blockValue = document.getElementById("blockValue")?.value?.trim();
+
+  if (!blockValue) {
+    alert("Please enter a value to block.");
+    return;
+  }
+
+  try {
+    await api("/api/domains", {
+      method: "POST",
+      body: JSON.stringify({
+        domain: blockValue,
+      })
+    });
+
+    document.getElementById("blockValue").value = "";
+    await loadDomains();
+  } catch (err) {
+    console.error(err);
+    alert("Failed to add domain. Check backend.");
+  }
+});
+
+async function disableDomain(id) {
+  if (!id) return;
+
+  const ok = confirm("Disable this block rule?");
+  if (!ok) return;
+
+  try {
+    await api(`/api/domains/${encodeURIComponent(id)}/disable`, {
+      method: "POST"
+    });
+    await loadDomains();
+  } catch (err) {
+    console.error(err);
+    alert("Failed to disable domain.");
+  }
+}
+
+async function enableDomain(id) {
+  if (!id) return;
+
+  try {
+    await api(`/api/domains/${encodeURIComponent(id)}/enable`, {
+      method: "POST"
+    });
+    await loadDomains();
+  } catch (err) {
+    console.error(err);
+    alert("Failed to enable domain.");
+  }
+}
+
+async function deleteDomain(id) {
+  if (!id) return;
+
+  const ok = confirm("Delete this block rule permanently?");
+  if (!ok) return;
+
+  try {
+    await api(`/api/domains/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    });
+    await loadDomains();
+  } catch (err) {
+    console.error(err);
+    alert("Failed to delete domain.");
+  }
+}
+
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+document.addEventListener("DOMContentLoaded", loadDomains);
+
+window.disableDomain = disableDomain;
+window.enableDomain = enableDomain;
+window.deleteDomain = deleteDomain;
+</script>
+
+<style>
+    .block-rules-grid {
+        display: grid;
+        gap: 15px;
+        margin-top: 20px;
+    }
+    .block-rule-item {
+        background: white;
+        padding: 20px;
+        border-radius: 12px;
+        border-left: 4px solid #ef4444;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        transition: all 0.3s ease;
+    }
+    .block-rule-item:hover {
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        transform: translateX(5px);
+    }
+    .rule-info h4 {
+        color: #2d3748;
+        font-size: 16px;
+        margin-bottom: 5px;
+    }
+    .rule-meta {
+        display: flex;
+        gap: 15px;
+        font-size: 13px;
+        color: #718096;
+    }
+    .rule-actions {
+        display: flex;
+        gap: 10px;
+    }
+    .category-badge {
+        padding: 4px 12px;
+        background: #fee;
+        color: #dc2626;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    .input-group {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 20px;
+    }
+    .input-group select,
+    .input-group input {
+        flex: 1;
+    }
+</style>
+
+{% endblock %}

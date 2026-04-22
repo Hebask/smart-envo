@@ -1,0 +1,531 @@
+{% extends "base.html" %}
+{% block title %}Profile Details{% endblock %}
+
+{% block content %}
+
+<div class="topbar">
+  <div class="heading">
+    <a href="/profiles" style="font-size:13px; color:#6B7280;
+       text-decoration:none; display:block; margin-bottom:4px;">← Back to Profiles</a>
+    <h1 id="profile-name">Loading...</h1>
+    <p id="profile-meta"></p>
+  </div>
+  <button class="btn-primary" onclick="showAddDevice()">+ Link Device</button>
+</div>
+
+<div id="profile-error" style="display:none; padding:12px 16px; background:#fef2f2;
+     border:1px solid #fecaca; border-radius:10px; color:#991b1b; margin-bottom:16px;"></div>
+
+<!-- Profile info card -->
+<div class="card" style="margin-bottom:20px;">
+  <div style="display:flex; align-items:center; gap:16px;">
+    <div id="profile-avatar" style="width:64px; height:64px; border-radius:50%;
+         display:flex; align-items:center; justify-content:center;
+         font-weight:700; font-size:26px; color:#fff; flex-shrink:0;">
+    </div>
+    <div>
+      <div style="font-size:18px; font-weight:700;" id="profile-name-card">—</div>
+      <div style="font-size:13px; color:#6B7280; margin-top:4px;" id="profile-email-card">—</div>
+      <div style="font-size:12px; color:#9CA3AF; margin-top:2px;" id="profile-notes-card"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Linked devices -->
+<div class="card" style="margin-bottom:20px;">
+  <div style="display:flex; justify-content:space-between; align-items:center;
+              margin-bottom:14px;">
+    <h3 style="margin:0; font-size:15px; font-weight:700;">Linked Devices</h3>
+    <span id="devices-count" style="background:#EFF6FF; color:#1D4ED8;
+          font-size:12px; font-weight:600; padding:4px 12px;
+          border-radius:999px;">0 devices</span>
+  </div>
+  <div id="devices-container">
+    <div style="color:#6B7280; font-size:13px; padding:12px 0;">
+      Loading devices...
+    </div>
+  </div>
+</div>
+
+<!-- Add device panel -->
+<div id="add-device-panel" class="card" style="display:none; margin-bottom:20px;
+     border:1px solid #BFDBFE; background:#EFF6FF;">
+  <h3 style="margin:0 0 14px; font-size:15px; font-weight:700; color:#1D4ED8;">
+    Link a Device
+  </h3>
+  <div id="available-devices-list">
+    <div style="color:#6B7280; font-size:13px;">Loading available devices...</div>
+  </div>
+  <button class="btn" onclick="hideAddDevice()"
+          style="margin-top:12px;">Cancel</button>
+</div>
+
+<div class="card" id="profile-analytics" style="margin-top:20px;">
+  <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+    <h3 class="card-title">Usage Summary</h3>
+    <div style="display:flex;gap:8px;">
+      <button class="btn" id="ai-days-7" onclick="loadProfileAI(PROFILE_ID, 7)">Last 7 Days</button>
+      <button class="btn" id="ai-days-30" onclick="loadProfileAI(PROFILE_ID, 30)">Last 30 Days</button>
+    </div>
+  </div>
+
+  <div id="profile-ai-loading" style="padding:16px; color:#6B7280;">
+    Generating AI analysis...
+  </div>
+
+  <div id="profile-ai-error" style="display:none; padding:12px 16px; background:#fef2f2;
+       border:1px solid #fecaca; border-radius:10px; color:#991b1b; margin:0 16px 16px;"></div>
+
+  <div id="profile-ai-content" style="display:none; padding:0 16px 16px;">
+    <div id="profile-ai-box" class="ai-report-box"></div>
+  </div>
+</div>
+
+
+<script>
+
+function formatDateTime(ts) {
+  if (!ts) return "-";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString();
+}
+
+function safeNumber(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+const PROFILE_ID = Number('{{ profile_id }}');
+
+async function api(path, options = {}) {
+  return await apiFetch(path, options);
+}
+
+const AVATAR_COLORS = [
+  "#4f46e5","#0891b2","#059669","#d97706",
+  "#dc2626","#7c3aed","#db2777","#0284c7"
+];
+
+function avatarColor(name) {
+  let hash = 0;
+  for (let c of (name || "?")) hash = c.charCodeAt(0) + ((hash << 5) - hash);
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
+
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function showError(msg) {
+  const el = document.getElementById("profile-error");
+  el.textContent = msg;
+  el.style.display = "block";
+}
+
+function hideError() {
+  document.getElementById("profile-error").style.display = "none";
+}
+
+async function loadProfile() {
+  hideError();
+  try {
+    const data = await api(`/api/managed-users/${PROFILE_ID}`);
+    if (!data.ok) throw new Error(data.error || "Not found");
+    renderProfile(data.item);
+  } catch (e) {
+    showError("Could not load profile: " + e.message);
+  }
+}
+
+function renderProfile(p) {
+  const color = avatarColor(p.name);
+  const letter = (p.name || "?").charAt(0).toUpperCase();
+
+  document.getElementById("profile-name").textContent = p.name;
+  document.getElementById("profile-name-card").textContent = p.name;
+  document.getElementById("profile-email-card").textContent =
+    p.email || "No email set";
+  document.getElementById("profile-notes-card").textContent =
+    p.notes || "";
+  document.getElementById("profile-meta").textContent =
+    `Created ${(p.created_at || "").slice(0, 10)}`;
+
+  const avatar = document.getElementById("profile-avatar");
+  avatar.style.background = color;
+  avatar.textContent = letter;
+
+  renderDevices(p.devices || []);
+}
+
+function renderDevices(devices) {
+  const container = document.getElementById("devices-container");
+  const countEl = document.getElementById("devices-count");
+
+  countEl.textContent = `${devices.length} device${devices.length !== 1 ? "s" : ""}`;
+
+  if (!devices.length) {
+    container.innerHTML = `
+      <div style="color:#6B7280; font-size:13px; padding:12px 0;">
+        No devices linked yet. Click "+ Link Device" to add one.
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = devices.map(d => `
+    <div style="display:flex; justify-content:space-between; align-items:center;
+                padding:12px 0; border-bottom:1px solid #F1F5F9; flex-wrap:wrap; gap:8px;">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <div style="width:36px; height:36px; border-radius:50%; background:#F1F5F9;
+             display:flex; align-items:center; justify-content:center;
+             font-size:16px;">📱</div>
+        <div>
+          <div style="font-size:14px; font-weight:600; color:#111827;">
+            ${escapeHtml(d.name || "Unnamed Device")}
+          </div>
+          <div style="font-size:12px; color:#6B7280; margin-top:2px;">
+            ${escapeHtml(d.mac)} • ${escapeHtml(d.last_ip || "No IP")}
+          </div>
+        </div>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:11px; padding:3px 10px; border-radius:999px;
+              background:${d.internet_blocked ? "#FEF2F2" : "#F0FDF4"};
+              color:${d.internet_blocked ? "#DC2626" : "#16A34A"}; font-weight:600;">
+          ${d.internet_blocked ? "Blocked" : "Active"}
+        </span>
+        <button class="btn btn-danger" onclick="unlinkDevice('${escapeHtml(d.mac)}')">
+          Unlink
+        </button>
+      </div>
+    </div>
+  `).join("");
+}
+
+async function showAddDevice() {
+  hideError();
+  const panel = document.getElementById("add-device-panel");
+  panel.style.display = "block";
+
+  const listEl = document.getElementById("available-devices-list");
+  listEl.innerHTML = `<div style="color:#6B7280; font-size:13px;">Loading...</div>`;
+
+  try {
+    const [allData, linkedData] = await Promise.all([
+      api("/api/devices"),
+      api(`/api/managed-users/${PROFILE_ID}/devices`)
+    ]);
+
+    const allDevices = allData.devices || allData.items || allData || [];
+    const linkedMacs = new Set(
+      (linkedData.items || []).map(d => d.mac.toLowerCase())
+    );
+
+    const available = allDevices.filter(
+      d => !linkedMacs.has((d.mac || "").toLowerCase())
+    );
+
+    if (!available.length) {
+      listEl.innerHTML = `
+        <div style="color:#6B7280; font-size:13px;">
+          All devices are already linked to this profile.
+        </div>`;
+      return;
+    }
+
+    listEl.innerHTML = available.map(d => `
+      <div style="display:flex; justify-content:space-between; align-items:center;
+                  padding:10px 0; border-bottom:1px solid #BFDBFE;">
+        <div>
+          <div style="font-size:14px; font-weight:600;">
+            ${escapeHtml(d.name || "Unnamed Device")}
+          </div>
+          <div style="font-size:12px; color:#6B7280;">
+            ${escapeHtml(d.mac)} • ${escapeHtml(d.last_ip || "No IP")}
+          </div>
+        </div>
+        <button class="btn" onclick="linkDevice('${escapeHtml(d.mac)}')"
+                style="background:#1D4ED8; color:white; border-color:#1D4ED8;">
+          Link
+        </button>
+      </div>
+    `).join("");
+
+  } catch (e) {
+    listEl.innerHTML = `<div style="color:#DC2626; font-size:13px;">
+      Failed to load devices: ${e.message}</div>`;
+  }
+}
+
+function hideAddDevice() {
+  document.getElementById("add-device-panel").style.display = "none";
+}
+
+async function linkDevice(mac) {
+  hideError();
+  try {
+    const data = await api(`/api/managed-users/${PROFILE_ID}/devices`, {
+      method: "POST",
+      body: JSON.stringify({ device_mac: mac })
+    });
+    if (!data.ok) throw new Error(data.error || "Failed");
+    hideAddDevice();
+    await loadProfile();
+  } catch (e) {
+    const errorMsg = e.message || "";
+    if (errorMsg.includes("409") || errorMsg.toLowerCase().includes("already")) {
+      const reassign = confirm(
+        "This device already belongs to another profile. Reassign it to this profile?"
+      );
+      if (reassign) {
+        try {
+          const reassignRes = await api(`/api/managed-users/${PROFILE_ID}/devices/reassign`, {
+            method: "POST",
+            body: JSON.stringify({ device_mac: mac })
+          });
+          if (!reassignRes.ok) throw new Error(reassignRes.error || "Reassign failed");
+          hideAddDevice();
+          await loadProfile();
+        } catch (reassignErr) {
+          showError("Failed to reassign device: " + reassignErr.message);
+        }
+      }
+    } else {
+      showError("Failed to link device: " + e.message);
+    }
+  }
+}
+
+async function unlinkDevice(mac) {
+  if (!confirm("Unlink this device from the profile?")) return;
+  hideError();
+  try {
+    const data = await api(
+      `/api/managed-users/${PROFILE_ID}/devices/${encodeURIComponent(mac)}`,
+      { method: "DELETE" }
+    );
+    if (!data.ok) throw new Error(data.error || "Failed");
+    await loadProfile();
+  } catch (e) {
+    showError("Failed to unlink device: " + e.message);
+  }
+}
+
+
+async function loadProfileOverview() {
+  try {
+    const res = await api(`/api/managed-users/${PROFILE_ID}/overview`);
+    if (!res.ok) return;
+
+    const summary = res.summary || {};
+
+    const devicesCount = summary.devices_count || 0;
+    const blockedDevices = summary.blocked_devices_count || 0;
+    const dnsFiltered = summary.dns_filtered_devices_count || 0;
+    const pendingDevices = summary.pending_devices_count || 0;
+
+    document.getElementById("overview-total-visits").textContent = safeNumber(devicesCount);
+    document.getElementById("overview-devices-count").textContent = safeNumber(blockedDevices);
+    document.getElementById("overview-top-category").textContent = safeNumber(dnsFiltered);
+    document.getElementById("overview-placeholder").textContent = safeNumber(pendingDevices);
+
+  } catch (e) {
+    console.error("Overview not available:", e);
+    document.getElementById("overview-placeholder").textContent = "Unavailable";
+  }
+}
+
+
+function setAIButtons(days) {
+  const b7 = document.getElementById("ai-days-7");
+  const b30 = document.getElementById("ai-days-30");
+  if (!b7 || !b30) return;
+
+  [b7, b30].forEach(btn => {
+    btn.style.background = "#fff";
+    btn.style.color = "#374151";
+    btn.style.borderColor = "#D1D5DB";
+  });
+
+  const active = days >= 30 ? b30 : b7;
+  active.style.background = "#4F46E5";
+  active.style.color = "#fff";
+  active.style.borderColor = "#4F46E5";
+}
+
+function renderProfileAI(report) {
+  const box = document.getElementById("profile-ai-box");
+  if (!box) return;
+
+  const categories = Array.isArray(report.dominant_categories) ? report.dominant_categories : [];
+  const platforms = Array.isArray(report.top_platforms) ? report.top_platforms : [];
+  const actions = Array.isArray(report.recommended_actions) ? report.recommended_actions : [];
+  const days = Number(report.period_days || 7);
+  const title = days >= 30 ? "Last 30 Days Summary" : "Last 7 Days Summary";
+
+  const chips = (items, bg, color) => items.map(item =>
+    `<span style="display:inline-block;margin:4px 6px 0 0;padding:6px 10px;border-radius:999px;background:${bg};color:${color};font-size:12px;font-weight:600;">${escapeHtml(item)}</span>`
+  ).join("");
+
+  box.innerHTML = `
+    <div style="margin-bottom:14px;">
+      <span style="font-size:20px;font-weight:800;color:#111827;">${title}</span>
+    </div>
+
+    <div style="font-size:14px;line-height:1.7;color:#1F2937;margin-bottom:14px;">${escapeHtml(report.summary || "")}</div>
+
+    <div style="margin-bottom:14px;">
+      <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:6px;">Content focus</div>
+      <div style="font-size:14px;line-height:1.7;color:#374151;">${escapeHtml(report.content_focus || "")}</div>
+    </div>
+
+    <div style="margin-bottom:14px;">
+      <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:6px;">Time pattern</div>
+      <div style="font-size:14px;line-height:1.7;color:#374151;">${escapeHtml(report.time_pattern || "")}</div>
+    </div>
+
+    <div style="margin-bottom:14px;">
+      <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:6px;">Dominant categories</div>
+      <div>${categories.length ? chips(categories, "#EEF2FF", "#4338CA") : '<span style="color:#6B7280;font-size:13px;">No dominant categories identified.</span>'}</div>
+    </div>
+
+    <div style="margin-bottom:14px;">
+      <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:6px;">Top platforms</div>
+      <div>${platforms.length ? chips(platforms, "#EFF6FF", "#1D4ED8") : '<span style="color:#6B7280;font-size:13px;">No platform pattern identified.</span>'}</div>
+    </div>
+
+    <div>
+      <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:6px;">Recommended actions</div>
+      ${actions.length ? `<ul style="margin:0;padding-left:20px;color:#374151;line-height:1.8;">${actions.map(a => `<li>${escapeHtml(a)}</li>`).join("")}</ul>` : '<span style="color:#6B7280;font-size:13px;">No specific action suggested.</span>'}
+    </div>
+  `;
+}
+
+async function loadProfileAI(profileId, days = 7) {
+  const loadingEl = document.getElementById("profile-ai-loading");
+  const errorEl = document.getElementById("profile-ai-error");
+  const contentEl = document.getElementById("profile-ai-content");
+
+  setAIButtons(days);
+
+  if (loadingEl) {
+    loadingEl.style.display = "block";
+    loadingEl.textContent = `Generating AI analysis for the last ${days} days...`;
+  }
+  if (errorEl) {
+    errorEl.style.display = "none";
+    errorEl.textContent = "";
+  }
+  if (contentEl) contentEl.style.display = "none";
+
+  try {
+    const res = await api(`/api/managed-users/${profileId}/analytics/ai?days=${days}`);
+    if (!res.ok) throw new Error(res.error || "Failed to load AI analysis");
+
+    renderProfileAI(res.report || {});
+    if (loadingEl) loadingEl.style.display = "none";
+    if (contentEl) contentEl.style.display = "block";
+  } catch (e) {
+    console.error(e);
+    if (loadingEl) loadingEl.style.display = "none";
+    if (errorEl) {
+      errorEl.textContent = "Failed to generate AI analysis.";
+      errorEl.style.display = "block";
+    }
+  }
+}
+
+window.showAddDevice = showAddDevice;
+window.hideAddDevice = hideAddDevice;
+window.linkDevice = linkDevice;
+window.unlinkDevice = unlinkDevice;
+
+
+function renderProfileCategories(categories) {
+  const el = document.getElementById("profile-category-list");
+  if (!el) return;
+  if (!categories.length) {
+    el.innerHTML = `<div style="color:#6B7280;font-size:13px;padding:12px 0;">No category data yet.</div>`;
+    return;
+  }
+  el.innerHTML = categories.map(c => `
+    <div style="display:flex;justify-content:space-between;align-items:center;
+                padding:10px 0;border-bottom:1px solid #F1F5F9;font-size:13px;">
+      <span style="font-weight:600;color:#111827;">${escapeHtml(c.category)}</span>
+      <span style="color:#6B7280;">${c.percentage ?? c.count ?? 0}%</span>
+    </div>
+  `).join("");
+}
+
+function renderProfileDaily(daily) {
+  const el = document.getElementById("profile-daily-list");
+  if (!el) return;
+  if (!daily.length) {
+    el.innerHTML = `<div style="color:#6B7280;font-size:13px;padding:12px 0;">No activity data yet.</div>`;
+    return;
+  }
+  el.innerHTML = daily.map(d => `
+    <div style="display:flex;justify-content:space-between;align-items:center;
+                padding:10px 0;border-bottom:1px solid #F1F5F9;font-size:13px;">
+      <span style="color:#374151;">${escapeHtml(d.day)}</span>
+      <span style="font-weight:600;color:#111827;">${d.visits ?? 0} visits</span>
+    </div>
+  `).join("");
+}
+
+function renderProfileTopSites(sites) {
+  const el = document.getElementById("profile-top-sites");
+  if (!el) return;
+  if (!sites.length) {
+    el.innerHTML = `<div style="color:#6B7280;font-size:13px;padding:12px 0;">No site data yet.</div>`;
+    return;
+  }
+  el.innerHTML = sites.map((s, i) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;
+                padding:10px 0;border-bottom:1px solid #F1F5F9;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="width:28px;height:28px;border-radius:50%;background:#3B82F6;
+                    color:white;display:flex;align-items:center;justify-content:center;
+                    font-weight:700;font-size:12px;flex-shrink:0;">${i + 1}</div>
+        <div>
+          <div style="font-size:13px;font-weight:600;color:#111827;">${escapeHtml(s.domain)}</div>
+          <div style="font-size:12px;color:#6B7280;">${escapeHtml(s.category || "")}</div>
+        </div>
+      </div>
+      <span style="font-size:13px;font-weight:700;color:#111827;">${s.visits ?? 0}</span>
+    </div>
+  `).join("");
+}
+
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadProfile();
+  loadProfileAI(PROFILE_ID, 7);
+  loadProfileOverview();
+});
+
+</script>
+
+<style>
+.ai-report-box {
+  background:#F8FAFC;
+  border:1px solid #E5E7EB;
+  border-radius:14px;
+  padding:18px;
+}
+
+.topbar { display:flex; align-items:flex-start; justify-content:space-between;
+          gap:14px; margin-bottom:20px; flex-wrap:wrap; }
+.heading h1 { margin:4px 0 0; font-size:22px; font-weight:800; }
+.heading p  { margin-top:6px; color:#6B7280; font-size:13px; }
+.btn-primary { background:#0B0F19; color:white; border:0; border-radius:10px;
+               padding:10px 16px; font-weight:600; cursor:pointer; }
+.card { background:white; border-radius:14px; padding:16px;
+        border:1px solid #E9EEF5; }
+.btn { border:1px solid #E9EEF5; background:white; padding:7px 12px;
+       border-radius:10px; font-size:13px; cursor:pointer; }
+.btn-danger { color:#EF4444; }
+</style>
+
+{% endblock %}

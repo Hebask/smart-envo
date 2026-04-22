@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <meta charset="UTF-8">
+    <title>{% block title %}smart-envo{% endblock %}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet"
+          href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    {% block extra_css %}{% endblock %}
+</head>
+
+<body>
+<div class="dashboard">
+
+    {% include "_sidebar.html" %}
+
+    <main class="main-content">
+        {% block content %}{% endblock %}
+    </main>
+
+</div>
+
+<script>
+    window.API_BASE = {{ api_base|tojson }};
+    window.USER_EMAIL = {{ user_email|tojson }};
+</script>
+
+<script src="{{ url_for('static', filename='api_base.js') }}"></script>
+</body>
+</html>

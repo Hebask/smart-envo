@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block title %}smart-envo Backup{% endblock %}
+{% block content %}
+
+<style>
+  .backup-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 16px; background: #f7fafc; border-radius: 10px;
+    margin-bottom: 10px; border-left: 4px solid #667eea;
+  }
+  .backup-name { font-weight: 600; color: #2d3748; font-size: 14px; }
+  .backup-meta { font-size: 12px; color: #718096; margin-top: 3px; }
+  .backup-actions { display: flex; gap: 8px; }
+
+</style>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-left">
+<h1>smart-envo Backup</h1>
+<p>Manage smart-envo backups and exports</p>
+  </div>
+</header>
+
+<!-- Create Backup -->
+<div class="card" style="margin-bottom:20px;">
+  <div class="card-header">
+    <h3 class="card-title">Create Backup</h3>
+  </div>
+  <div style="display:flex;gap:12px;padding:16px;flex-wrap:wrap;">
+    <button class="btn btn-primary" onclick="createBackup('sqlite')">
+      <i class="fa-solid fa-database"></i> Create SQLite Backup
+    </button>
+    <button class="btn btn-outline" onclick="createBackup('json')">
+      <i class="fa-solid fa-file-export"></i> Export JSON
+    </button>
+  </div>
+</div>
+
+<!-- Backup List -->
+<div class="card">
+  <div class="card-header">
+    <h3 class="card-title">Available Backups</h3>
+  </div>
+  <div style="padding:16px;">
+    <div id="backup-list">
+      <div style="color:#718096;padding:10px;">Loading backups...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let IS_SUPER_ADMIN = false;
+
+    function inferBackupType(name) {
+    const lower = String(name || "").toLowerCase();
+    if (lower.endsWith(".json")) return "json";
+    return "sqlite";
+  }
+
+  function formatBytes(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return "0 B";
+
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let size = value;
+    let unitIndex = 0;
+
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+
+    return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+  }
+
+  // ── Init ──
+  async function initBackupPage() {
+    try {
+      const me = await apiFetch("/api/me");
+      IS_SUPER_ADMIN = (me.user?.role === "super_admin");
+    } catch (e) {
+      console.warn("Could not check role:", e);
+      IS_SUPER_ADMIN = false;
+    }
+    await loadBackups();
+  }
+
+  // ── Load list ──
+// Backend returns: { ok, items: [ { name, size_bytes, modified_at }, ... ] }
+  async function loadBackups() {
+    const container = document.getElementById("backup-list");
+    try {
+      const data = await apiFetch("/api/backups");
+      const items = data.items || [];
+
+      if (!items.length) {
+        container.innerHTML = `<div style="color:#718096;padding:10px;">No backups found.</div>`;
+        return;
+      }
+
+container.innerHTML = items.map(b => {
+  const backupName = b.name || "";
+  const backupType = inferBackupType(backupName);
+
+  return `
+    <div class="backup-row">
+      <div>
+        <div class="backup-name">${backupName}</div>
+        <div class="backup-meta">
+          ${backupType.toUpperCase()}
+          ${b.size_bytes ? " · " + formatBytes(b.size_bytes) : ""}
+          ${b.modified_at ? " · " + b.modified_at : ""}
+        </div>
+      </div>
+
+      <div class="backup-actions">
+        ${IS_SUPER_ADMIN ? `
+          <button class="btn btn-warning" onclick="confirmRestore('${backupName}', '${backupType}')">
+            Restore
+          </button>
+        ` : ""}
+      </div>
+    </div>
+  `;
+}).join("");
+
+    } catch (e) {
+      console.error(e);
+      container.innerHTML = `<div style="color:#dc2626;padding:10px;">Failed to load backups.</div>`;
+    }
+  }
+
+  // ── Create backup ──
+  // sqlite → POST /api/backups/sqlite
+  // json   → POST /api/backups/json
+  async function createBackup(type) {
+    try {
+      await apiFetch(`/api/backups/${type}`, { method: "POST" });
+      alert(`${type === "sqlite" ? "SQLite backup" : "JSON export"} created successfully.`);
+      await loadBackups();
+    } catch (e) {
+      console.error(e);
+      alert("Failed to create backup.");
+    }
+  }
+
+
+
+  function confirmRestore(filename, type) {
+    const ok = confirm(
+      `Are you sure you want to restore this backup?\n\n${filename}\n\nThis will overwrite current data.`
+    );
+    if (!ok) return;
+
+    restoreBackup(filename, type);
+  }
+
+  async function restoreBackup(filename, type) {
+    try {
+      const endpoint = type === "sqlite"
+        ? "/api/backups/restore/sqlite"
+        : "/api/backups/restore/json";
+
+      await apiFetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename })
+      });
+
+      alert("Backup restored successfully. The system may restart.");
+      await loadBackups();
+
+    } catch (e) {
+      console.error(e);
+
+      const msg = String(e?.message || "");
+
+      if (msg.includes("403")) {
+        alert("Only super admin can restore backups.");
+        return;
+      }
+
+      alert("Restore failed.");
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", initBackupPage);
+</script>
+
+{% endblock %}

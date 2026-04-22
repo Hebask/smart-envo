@@ -1,0 +1,182 @@
+"""
+app/services/service_enforcer.py
+
+Selective service enforcement.
+
+Why this exists:
+- dnsmasq-filtered uses one shared domains file.
+- writing service domains into that shared file makes them affect whichever
+  devices are already DNS-filtered, which is not selective.
+
+This module enforces service rules by:
+- resolving enabled service domains to IPv4 addresses
+- creating MAC + destination-IP DROP rules in a dedicated SERVICE_BLOCK chain
+- targeting either: all devices, one device, or all members of one group
+
+The policy scheduler refreshes these rules periodically so DNS changes are
+picked up over time. Service create/update/domain changes also refresh them
+immediately.
+"""
+
+from __future__ import annotations
+
+import socket
+from typing import List
+
+from flask import current_app
+
+from app.db import get_db
+from app.services.firewall import sh, run_cmd, iptables_rule_exists, iptables_add_rule
+from app.services.runtime_settings import is_setting_enabled
+
+def _norm_mac(mac: str) -> str:
+    return (mac or "").strip().lower()
+
+
+def _resolve_ipv4s(domain: str) -> List[str]:
+    ips: set[str] = set()
+    for target in {domain.strip().lower()}:
+        if not target:
+            continue
+        try:
+            results = socket.getaddrinfo(
+                target,
+                443,
+                family=socket.AF_INET,
+                type=socket.SOCK_STREAM,
+            )
+        except Exception:
+            results = []
+
+        for item in results:
+            sockaddr = item[4]
+            if sockaddr and sockaddr[0]:
+                ips.add(sockaddr[0])
+
+    return sorted(ips)
+
+
+def _ensure_service_chain() -> None:
+    sh(["sudo", "iptables", "-w", "3", "-N", "SERVICE_BLOCK"])
+    if not iptables_rule_exists(None, "FORWARD", ["-j", "SERVICE_BLOCK"]):
+        iptables_add_rule(None, "FORWARD", ["-j", "SERVICE_BLOCK"], insert=True, position=1)
+
+
+def _flush_service_chain() -> None:
+    run_cmd(["sudo", "iptables", "-w", "3", "-F", "SERVICE_BLOCK"], timeout=15)
+
+
+def _all_approved_device_macs(cur) -> List[str]:
+    cur.execute("SELECT mac FROM devices WHERE approved=1 ORDER BY mac")
+    return [_norm_mac(r["mac"]) for r in cur.fetchall() if r["mac"]]
+
+
+def _group_member_macs(cur, group_id: int) -> List[str]:
+    cur.execute(
+        "SELECT device_mac FROM group_members WHERE group_id=? ORDER BY device_mac",
+        (group_id,),
+    )
+    return [_norm_mac(r["device_mac"]) for r in cur.fetchall() if r["device_mac"]]
+
+
+def _target_macs_for_service(cur, service_row: dict) -> List[str]:
+    applies_to = (service_row.get("applies_to") or "all").strip().lower()
+
+    if applies_to == "device":
+        mac = _norm_mac(service_row.get("device_mac") or "")
+        return [mac] if mac else []
+
+    if applies_to == "group" and service_row.get("group_id") is not None:
+        try:
+            gid = int(service_row["group_id"])
+        except Exception:
+            return []
+        return _group_member_macs(cur, gid)
+
+    return _all_approved_device_macs(cur)
+
+
+def get_enabled_service_rules() -> List[dict]:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT s.id, s.name, s.applies_to, s.device_mac, s.group_id,
+               sd.id AS service_domain_id, sd.domain
+        FROM services s
+        JOIN service_domains sd ON sd.service_id = s.id
+        WHERE s.enabled=1 AND sd.enabled=1
+        ORDER BY s.id ASC, sd.domain ASC
+        """
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def apply_service_blocks() -> None:
+    """
+    Rebuild SERVICE_BLOCK chain from current enabled service rules.
+    Selective by target MAC + resolved destination IPv4.
+
+    Important:
+    when the global firewall setting is disabled, service enforcement must also
+    be fully disabled. In that case we keep the chain present but flush all
+    rules and return immediately.
+    """
+    _ensure_service_chain()
+    _flush_service_chain()
+
+    if not is_setting_enabled("firewall_enabled", True):
+        return
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT s.id, s.name, s.applies_to, s.device_mac, s.group_id, sd.domain
+        FROM services s
+        JOIN service_domains sd ON sd.service_id = s.id
+        WHERE s.enabled=1 AND sd.enabled=1
+        ORDER BY s.id ASC, sd.domain ASC
+        """
+    )
+    services = [dict(r) for r in cur.fetchall()]
+
+    ap = current_app.config["AP_IFACE"]
+    wan = current_app.config["WAN_IFACE"]
+
+    seen: set[tuple[str, str]] = set()
+
+    try:
+        for svc in services:
+            macs = _target_macs_for_service(cur, svc)
+            if not macs:
+                continue
+
+            ips = _resolve_ipv4s(svc["domain"])
+            if not ips:
+                continue
+
+            for mac in macs:
+                for ip in ips:
+                    key = (mac, ip)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    comment = f"svc:{svc['id']}:{svc['domain']}"
+                    if len(comment) > 255:
+                        comment = comment[:255]
+
+                    rule = [
+                        "-i", ap,
+                        "-o", wan,
+                        "-m", "mac", "--mac-source", mac,
+                        "-d", ip,
+                        "-m", "comment", "--comment", comment,
+                        "-j", "DROP",
+                    ]
+                    iptables_add_rule(None, "SERVICE_BLOCK", rule)
+    finally:
+        conn.close()
